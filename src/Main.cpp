@@ -125,6 +125,7 @@ static uint32_t g_ComputeQueueFamily = (uint32_t)-1;
 static uint32_t g_PresentQueueFamily = (uint32_t)-1;
 static VkDevice g_Device = VK_NULL_HANDLE;
 static VkQueue g_GraphicsQueue = VK_NULL_HANDLE;
+static VkQueue g_TransferQueue = VK_NULL_HANDLE;
 static VkQueue g_PresentQueue = VK_NULL_HANDLE;
 static VkSwapchainKHR g_Swapchain = VK_NULL_HANDLE;
 static VkFormat g_SwapchainFormat;
@@ -139,11 +140,15 @@ static VkRenderPass g_RenderPass;
 static VkPipeline g_GraphicsPipeline;
 static std::vector<VkFramebuffer> g_SwapchainFramebuffers;
 static VkCommandPool g_GraphicsCommandPool;
+static VkCommandPool g_TransferCommandPool;
+static std::vector<VkCommandBuffer> g_GraphicsCommandBuffers;
+static VkCommandBuffer g_TransferCommandBuffer;
+static VkDeviceMemory g_TriangleBufferMemory;
+static VkBuffer g_TriangleBuffer;
 static const uint32_t MAX_FRAMES_IN_FLIGHT = 2;
 static uint32_t g_CurrentFrame = 0;
 static std::vector<VkSemaphore> g_ImageAvailableSemaphores;
 static std::vector<VkSemaphore> g_RenderFinishedSemaphores;
-static std::vector<VkCommandBuffer> g_GraphicsCommandBuffers;
 static std::vector<VkFence> g_GraphicsCommandBufferIsUsedFences;
 
 static VKAPI_ATTR VkBool32 VKAPI_CALL DebugCallback(
@@ -445,7 +450,7 @@ void DestroyVkPhysicalDevice()
 Result InitVkDevice()
 {
   std::vector<uint32_t> queueFamilies = {
-    g_GraphicsQueueFamily, g_PresentQueueFamily };
+    g_GraphicsQueueFamily, g_PresentQueueFamily, g_TransferQueueFamily };
 
   std::vector<uint32_t> usedQueueFamilies;
   std::vector<VkDeviceQueueCreateInfo> queueCIs;
@@ -504,6 +509,7 @@ Result InitVkDevice()
     "vkCreateDevice");
 
   vkGetDeviceQueue(g_Device, g_GraphicsQueueFamily, 0, &g_GraphicsQueue);
+  vkGetDeviceQueue(g_Device, g_TransferQueueFamily, 0, &g_TransferQueue);
   vkGetDeviceQueue(g_Device, g_PresentQueueFamily, 0, &g_PresentQueue);
 
   return Result::Application(0);
@@ -740,12 +746,29 @@ Result InitVkGraphicsPipeline()
   shaderStageCIs[1].module = g_TriangleShaderFrag;
   shaderStageCIs[1].pName = "main";
 
+  VkVertexInputAttributeDescription vertexAttributeDescs[2];
+  vertexAttributeDescs[0] = {};
+  vertexAttributeDescs[0].binding = 0;
+  vertexAttributeDescs[0].location = 0;
+  vertexAttributeDescs[0].offset = 0;
+  vertexAttributeDescs[0].format = VK_FORMAT_R32G32_SFLOAT;
+  vertexAttributeDescs[1] = {};
+  vertexAttributeDescs[1].binding = 0;
+  vertexAttributeDescs[1].location = 1;
+  vertexAttributeDescs[1].offset = 2 * sizeof(float);
+  vertexAttributeDescs[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+
+  VkVertexInputBindingDescription vertexBindingDesc = {};
+  vertexBindingDesc.binding = 0;
+  vertexBindingDesc.stride = 5 * sizeof(float);
+  vertexBindingDesc.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
   VkPipelineVertexInputStateCreateInfo vertexInputStateCI = {};
   vertexInputStateCI.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-  vertexInputStateCI.vertexAttributeDescriptionCount = 0;
-  vertexInputStateCI.pVertexAttributeDescriptions = nullptr;
-  vertexInputStateCI.vertexBindingDescriptionCount = 0;
-  vertexInputStateCI.pVertexBindingDescriptions = nullptr;
+  vertexInputStateCI.vertexAttributeDescriptionCount = 2;
+  vertexInputStateCI.pVertexAttributeDescriptions = vertexAttributeDescs;
+  vertexInputStateCI.vertexBindingDescriptionCount = 1;
+  vertexInputStateCI.pVertexBindingDescriptions = &vertexBindingDesc;
 
   VkPipelineInputAssemblyStateCreateInfo inputAssemblyStateCI = {};
   inputAssemblyStateCI.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
@@ -972,6 +995,11 @@ Result InitVkCommandPools()
     RETURN_IF_FAILURE(Result::Vulkan(
       vkCreateCommandPool(g_Device, &poolCI, nullptr, &g_GraphicsCommandPool)),
       "vkCreateCommandPool");
+
+    poolCI.queueFamilyIndex = g_TransferQueueFamily;
+    RETURN_IF_FAILURE(Result::Vulkan(
+      vkCreateCommandPool(g_Device, &poolCI, nullptr, &g_TransferCommandPool)),
+      "vkCreateCommandPool");
   }
 
   return Result::Application(0);
@@ -979,6 +1007,12 @@ Result InitVkCommandPools()
 
 void DestroyVkCommandPools()
 {
+  if (g_TransferCommandPool != VK_NULL_HANDLE)
+  {
+    vkDestroyCommandPool(g_Device, g_TransferCommandPool, nullptr);
+    g_TransferCommandPool = VK_NULL_HANDLE;
+  }
+
   if (g_GraphicsCommandPool != VK_NULL_HANDLE)
   {
     vkDestroyCommandPool(g_Device, g_GraphicsCommandPool, nullptr);
@@ -1001,12 +1035,172 @@ Result InitVkCommandBuffers()
       "vkAllocateCommandBuffers");
   }
 
+  {
+    VkCommandBufferAllocateInfo allocInfo = {};
+    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocInfo.commandPool = g_TransferCommandPool;
+    allocInfo.commandBufferCount = 1;
+    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    RETURN_IF_FAILURE(Result::Vulkan(
+      vkAllocateCommandBuffers(g_Device, &allocInfo, &g_TransferCommandBuffer)),
+      "vkAllocateCommandBuffers");
+  }
+
   return Result::Application(0);
 }
 
 void DestroyVkCommandBuffers()
 {
+  g_TransferCommandBuffer = VK_NULL_HANDLE;
   g_GraphicsCommandBuffers.clear();
+}
+
+Result InitVkTriangleBuffer()
+{
+  std::vector<float> vertexData = {
+    // x                  y       r     g     b
+    0.0f,                 -0.5f,  1.0f, 0.0f, 0.0f,
+    sqrtf(3.0f) * 0.25f,  0.25f,  0.0f, 1.0f, 0.0f,
+    -sqrtf(3.0f) * 0.25f, 0.25f,  0.0f, 0.0f, 1.0f,
+    -0.75f,               0.0f,   0.5f, 0.5f, 0.5f,
+    0.75f,                0.0f,   0.5f, 0.5f, 0.5f, 
+  };
+
+  std::vector<uint32_t> indexData = {
+    0, 1, 2, 0, 2, 3, 0, 4, 1
+  };
+
+  uint32_t bufferSize = (uint32_t)(sizeof(float) * vertexData.size() + sizeof(uint32_t) * indexData.size());
+  std::vector<char> bufferData(bufferSize);
+  memcpy(bufferData.data(), (void*)vertexData.data(), sizeof(float) * vertexData.size());
+  memcpy(bufferData.data() + sizeof(float) * vertexData.size(), (void*)indexData.data(), sizeof(uint32_t) * indexData.size());
+
+  VkPhysicalDeviceMemoryProperties memoryProperties;
+  vkGetPhysicalDeviceMemoryProperties(g_PhysicalDevice, &memoryProperties);
+
+  auto FindMemoryType = [&memoryProperties](VkMemoryPropertyFlags propertyFlags, VkMemoryHeapFlags heapFlags) -> uint32_t
+  {
+    for (uint32_t i = 0; i < memoryProperties.memoryTypeCount; i++)
+    {
+      uint32_t heap = memoryProperties.memoryTypes[i].heapIndex;
+      if (((memoryProperties.memoryHeaps[heap].flags & heapFlags) == heapFlags)
+          && ((memoryProperties.memoryTypes[i].propertyFlags & propertyFlags) == propertyFlags))
+      {
+        return i;
+        break;
+      }
+    }
+    return (uint32_t)-1;
+  };
+
+  // Create device-local buffer
+  {
+    VkBufferCreateInfo bufferCI = {};
+    bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferCI.size = bufferSize;
+    bufferCI.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bufferCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    vkCreateBuffer(g_Device, &bufferCI, nullptr, &g_TriangleBuffer);
+
+    VkMemoryRequirements memoryReqs;
+    vkGetBufferMemoryRequirements(g_Device, g_TriangleBuffer, &memoryReqs);
+
+    // Find device-local memory type
+    uint32_t memoryType = FindMemoryType(
+      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+      VK_MEMORY_HEAP_DEVICE_LOCAL_BIT);
+
+    VkMemoryAllocateInfo allocateInfo = {};
+    allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocateInfo.memoryTypeIndex = memoryType;
+    allocateInfo.allocationSize = memoryReqs.size;
+    vkAllocateMemory(g_Device, &allocateInfo, nullptr, &g_TriangleBufferMemory);
+
+    vkBindBufferMemory(g_Device, g_TriangleBuffer, g_TriangleBufferMemory, 0);
+  }
+
+  VkBuffer stagingBuffer;
+  VkDeviceMemory stagingBufferMemory;
+
+  // Create staging buffer
+  {
+    VkBufferCreateInfo bufferCI = {};
+    bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferCI.size = bufferSize;
+    bufferCI.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    bufferCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    vkCreateBuffer(g_Device, &bufferCI, nullptr, &stagingBuffer);
+
+    VkMemoryRequirements memoryReqs;
+    vkGetBufferMemoryRequirements(g_Device, stagingBuffer, &memoryReqs);
+
+    // Find device-local memory type
+    uint32_t memoryType = FindMemoryType(
+      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+      0);
+
+    VkMemoryAllocateInfo allocateInfo = {};
+    allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocateInfo.memoryTypeIndex = memoryType;
+    allocateInfo.allocationSize = memoryReqs.size;
+    vkAllocateMemory(g_Device, &allocateInfo, nullptr, &stagingBufferMemory);
+
+    vkBindBufferMemory(g_Device, stagingBuffer, stagingBufferMemory, 0);
+  }
+
+  // Write to staging buffer
+  {
+    void* data;
+    vkMapMemory(g_Device, stagingBufferMemory, 0, bufferSize, 0, &data);
+    memcpy(data, bufferData.data(), bufferSize);
+    vkUnmapMemory(g_Device, stagingBufferMemory);
+  }
+
+  // Write from staging buffer to device-local buffer
+  {
+    VkBufferCopy copyRegion = {};
+    copyRegion.srcOffset = VkDeviceSize{ 0 };
+    copyRegion.dstOffset = VkDeviceSize{ 0 };
+    copyRegion.size = bufferSize;
+
+    VkCommandBufferBeginInfo beginInfo = {};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(g_TransferCommandBuffer, &beginInfo);
+    vkCmdCopyBuffer(g_TransferCommandBuffer, stagingBuffer, g_TriangleBuffer, 1, &copyRegion);
+    vkEndCommandBuffer(g_TransferCommandBuffer);
+
+    VkSubmitInfo submitInfo = {};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &g_TransferCommandBuffer;
+    vkQueueSubmit(g_TransferQueue, 1, &submitInfo, VK_NULL_HANDLE);
+    vkQueueWaitIdle(g_TransferQueue);
+  }
+
+  {
+    vkFreeCommandBuffers(g_Device, g_TransferCommandPool, 1, &g_TransferCommandBuffer);
+    g_TransferCommandBuffer = VK_NULL_HANDLE;
+    vkDestroyBuffer(g_Device, stagingBuffer, nullptr);
+    vkFreeMemory(g_Device, stagingBufferMemory, nullptr);
+  }
+
+  return Result::Application(0);
+}
+
+void DestroyVkTriangleBuffer()
+{
+  if (g_TriangleBuffer != VK_NULL_HANDLE)
+  {
+    vkDestroyBuffer(g_Device, g_TriangleBuffer, nullptr);
+    g_TriangleBuffer = VK_NULL_HANDLE;
+  }
+
+  if (g_TriangleBufferMemory != VK_NULL_HANDLE)
+  {
+    vkFreeMemory(g_Device, g_TriangleBufferMemory, nullptr);
+    g_TriangleBufferMemory = VK_NULL_HANDLE;
+  }
 }
 
 Result InitVkSemaphoresAndFences()
@@ -1087,6 +1281,7 @@ Result InitVulkan()
   RETURN_IF_FAILURE(InitVkSwapchainFramebuffers(), "InitVkSwapchainFramebuffers");
   RETURN_IF_FAILURE(InitVkCommandPools(), "InitVkCommandPools");
   RETURN_IF_FAILURE(InitVkCommandBuffers(), "InitVkCommandBuffers");
+  RETURN_IF_FAILURE(InitVkTriangleBuffer(), "InitVkTriangleBuffer");
   RETURN_IF_FAILURE(InitVkSemaphoresAndFences(), "InitVkSemaphoresAndFences");
 
   return Result::Application(0);
@@ -1106,6 +1301,7 @@ void Shutdown()
   vkDeviceWaitIdle(g_Device);
 
   DestroyVkSemaphoresAndFences();
+  DestroyVkTriangleBuffer();
   DestroyVkCommandBuffers();
   DestroyVkCommandPools();
   DestroyVkSwapchainFramebuffers();
@@ -1140,16 +1336,17 @@ float g_WorldTime = 0.0f;
 
 Result WriteCommandBuffers(uint32_t swapchainImageIndex)
 {
+  VkCommandBuffer commandBuffer = g_GraphicsCommandBuffers[g_CurrentFrame];
+
   RETURN_IF_FAILURE(Result::Vulkan(
-    vkResetCommandBuffer(g_GraphicsCommandBuffers[g_CurrentFrame], 0)),
+    vkResetCommandBuffer(commandBuffer, 0)),
     "vkResetCommandBuffer");
 
   VkCommandBufferBeginInfo beginInfo = {};
   beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
   beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-
   RETURN_IF_FAILURE(Result::Vulkan(
-    vkBeginCommandBuffer(g_GraphicsCommandBuffers[g_CurrentFrame], &beginInfo)),
+    vkBeginCommandBuffer(commandBuffer, &beginInfo)),
     "vkBeginCommandBuffer");
 
   VkClearValue clearColor = { 0.0f, 0.0f, 0.0f, 1.0f };
@@ -1161,6 +1358,13 @@ Result WriteCommandBuffers(uint32_t swapchainImageIndex)
   renderPassBeginInfo.framebuffer = g_SwapchainFramebuffers[swapchainImageIndex];
   renderPassBeginInfo.renderArea.offset = { 0, 0 };
   renderPassBeginInfo.renderArea.extent = g_SwapchainExtent;
+  vkCmdBeginRenderPass(commandBuffer, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
+
+  VkDeviceSize vertexBufferOffset = 0;
+  vkCmdBindVertexBuffers(commandBuffer, 0, 1, &g_TriangleBuffer, &vertexBufferOffset);
+
+  VkDeviceSize indexBufferOffset = 5 * 5 * sizeof(float);
+  vkCmdBindIndexBuffer(commandBuffer, g_TriangleBuffer, indexBufferOffset, VK_INDEX_TYPE_UINT32);
 
   VkViewport viewport = {};
   viewport.x = 0;
@@ -1169,15 +1373,17 @@ Result WriteCommandBuffers(uint32_t swapchainImageIndex)
   viewport.height = (float)g_SwapchainExtent.height;
   viewport.minDepth = 0.0f;
   viewport.maxDepth = 1.0f;
+  vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
 
-  vkCmdBeginRenderPass(g_GraphicsCommandBuffers[g_CurrentFrame], &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
-  vkCmdBindPipeline(g_GraphicsCommandBuffers[g_CurrentFrame], VK_PIPELINE_BIND_POINT_GRAPHICS, g_GraphicsPipeline);
-  vkCmdPushConstants(g_GraphicsCommandBuffers[g_CurrentFrame], g_PipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(float), &g_WorldTime);
-  vkCmdSetViewport(g_GraphicsCommandBuffers[g_CurrentFrame], 0, 1, &viewport);
-  vkCmdDraw(g_GraphicsCommandBuffers[g_CurrentFrame], 3, 1, 0, 0);
-  vkCmdEndRenderPass(g_GraphicsCommandBuffers[g_CurrentFrame]);
+  vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, g_GraphicsPipeline);
+  vkCmdPushConstants(commandBuffer, g_PipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(float), &g_WorldTime);
+
+  vkCmdDrawIndexed(commandBuffer, 9, 1, 0, 0, 0);
+
+  vkCmdEndRenderPass(commandBuffer);
+
   RETURN_IF_FAILURE(Result::Vulkan(
-    vkEndCommandBuffer(g_GraphicsCommandBuffers[g_CurrentFrame])),
+    vkEndCommandBuffer(commandBuffer)),
     "vkEndCommandBuffer");
 
   return Result::Application(0);
