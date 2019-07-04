@@ -9,6 +9,7 @@
 
 #include "ShaderBytecode/Triangle.vert.h"
 #include "ShaderBytecode/Triangle.frag.h"
+#include "Main.h"
 
 struct Result
 {
@@ -30,8 +31,14 @@ struct Result
 
   bool Success() const
   {
-    return (category == CATEGORY_APPLICATION) && appResult == 0
-      || (category == CATEGORY_VULKAN) && vkResult == VK_SUCCESS;
+    switch (category)
+    {
+      case CATEGORY_APPLICATION:
+      return appResult == 0;
+      case CATEGORY_VULKAN:
+      return vkResult >= 0;
+    }
+    return false;
   }
 
   enum Category
@@ -74,6 +81,8 @@ void HandleResult(Result res, const char* message)
 static SDL_Window* g_Window;
 static uint32_t g_WindowWidth = 600;
 static uint32_t g_WindowHeight = 600;
+static uint32_t g_DrawableWidth;
+static uint32_t g_DrawableHeight;
 
 Result InitWindow()
 {
@@ -85,13 +94,24 @@ Result InitWindow()
     "",
     SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
     (int)g_WindowWidth, (int)g_WindowHeight,
-    SDL_WINDOW_HIDDEN | SDL_WINDOW_VULKAN);
+    SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_VULKAN);
 
   RETURN_IF_FAILURE(Result::Application(
     g_Window == nullptr ? 2 : 0),
     "SDL_CreateWindow");
 
+  int w, h;
+  SDL_Vulkan_GetDrawableSize(g_Window, &w, &h);
+  g_DrawableWidth = (uint32_t)w;
+  g_DrawableHeight = (uint32_t)h;
+
   return Result::Application(0);
+}
+
+void DestroyWindow()
+{
+  SDL_DestroyWindow(g_Window);
+  g_Window = nullptr;
 }
 
 static VkInstance g_Instance = VK_NULL_HANDLE;
@@ -197,6 +217,15 @@ Result InitVkInstance()
   return Result::Application(0);
 }
 
+void DestroyVkInstance()
+{
+  if (g_Instance != VK_NULL_HANDLE)
+  {
+    vkDestroyInstance(g_Instance, nullptr);
+    g_Instance = VK_NULL_HANDLE;
+  }
+}
+
 Result InitVkDebugMessenger()
 {
   VkDebugUtilsMessengerCreateInfoEXT ci = {};
@@ -227,10 +256,34 @@ Result InitVkDebugMessenger()
   return Result::Application(0);
 }
 
+void DestroyVkDebugMessenger()
+{
+  if (g_DebugMessenger != VK_NULL_HANDLE)
+  {
+    auto func = (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(
+      g_Instance, "vkDestroyDebugUtilsMessengerEXT");
+    if (func)
+    {
+      func(g_Instance, g_DebugMessenger, nullptr);
+    }
+
+    g_DebugMessenger = VK_NULL_HANDLE;
+  }
+}
+
 Result InitVkSurface()
 {
   return Result::Application(
     SDL_Vulkan_CreateSurface(g_Window, g_Instance, &g_Surface) == SDL_TRUE ? 0 : 1);
+}
+
+void DestroyVkSurface()
+{
+  if (g_Surface != VK_NULL_HANDLE)
+  {
+    vkDestroySurfaceKHR(g_Instance, g_Surface, nullptr);
+    g_Surface = VK_NULL_HANDLE;
+  }
 }
 
 Result InitVkPhysicalDevice()
@@ -379,6 +432,15 @@ Result InitVkPhysicalDevice()
   return Result::Application(g_PhysicalDevice == VK_NULL_HANDLE ? 1 : 0);
 }
 
+void DestroyVkPhysicalDevice()
+{
+  g_PresentQueueFamily = (uint32_t)-1;
+  g_GraphicsQueueFamily = (uint32_t)-1;
+  g_TransferQueueFamily = (uint32_t)-1;
+  g_ComputeQueueFamily = (uint32_t)-1;
+  g_PhysicalDevice = VK_NULL_HANDLE;
+}
+
 Result InitVkDevice()
 {
   std::vector<uint32_t> queueFamilies = {
@@ -444,6 +506,18 @@ Result InitVkDevice()
   vkGetDeviceQueue(g_Device, g_PresentQueueFamily, 0, &g_PresentQueue);
 
   return Result::Application(0);
+}
+
+void DestroyVkDevice()
+{
+  g_GraphicsQueue = VK_NULL_HANDLE;
+  g_PresentQueue = VK_NULL_HANDLE;
+
+  if (g_Device != VK_NULL_HANDLE)
+  {
+    vkDestroyDevice(g_Device, nullptr);
+    g_Device = VK_NULL_HANDLE;
+  }
 }
 
 Result InitVkSwapchain()
@@ -603,6 +677,26 @@ Result InitVkSwapchain()
   }
 
   return Result::Application(0);
+}
+
+void DestroyVkSwapchain()
+{
+  for (VkImageView imageView : g_SwapchainImageViews)
+  {
+    if (imageView != VK_NULL_HANDLE)
+    {
+      vkDestroyImageView(g_Device, imageView, nullptr);
+    }
+  }
+  g_SwapchainImageViews.clear();
+
+  g_SwapchainImages.clear();
+
+  if (g_Swapchain != VK_NULL_HANDLE)
+  {
+    vkDestroySwapchainKHR(g_Device, g_Swapchain, nullptr);
+    g_Swapchain = VK_NULL_HANDLE;
+  }
 }
 
 Result InitVkGraphicsPipeline()
@@ -794,172 +888,8 @@ Result InitVkGraphicsPipeline()
   return Result::Application(0);
 }
 
-Result InitVkSwapchainFramebuffers()
+void DestroyVkGraphicsPipeline()
 {
-  g_SwapchainFramebuffers.resize(g_SwapchainImageViews.size());
-
-  for (uint32_t i = 0; i < (uint32_t)g_SwapchainImageViews.size(); i++)
-  {
-    VkFramebufferCreateInfo framebufferCI = {};
-    framebufferCI.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-    framebufferCI.renderPass = g_RenderPass;
-    framebufferCI.attachmentCount = 1;
-    framebufferCI.pAttachments = &g_SwapchainImageViews[i];
-    framebufferCI.width = g_SwapchainExtent.width;
-    framebufferCI.height = g_SwapchainExtent.height;
-    framebufferCI.layers = 1;
-    RETURN_IF_FAILURE(Result::Vulkan(
-      vkCreateFramebuffer(g_Device, &framebufferCI, nullptr, &g_SwapchainFramebuffers[i])),
-      "vkCreateFramebuffer");
-  }
-
-  return Result::Application(0);
-}
-
-Result InitVkCommandPools()
-{
-  {
-    VkCommandPoolCreateInfo poolCI = {};
-    poolCI.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    poolCI.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-    poolCI.queueFamilyIndex = g_GraphicsQueueFamily;
-    RETURN_IF_FAILURE(Result::Vulkan(
-      vkCreateCommandPool(g_Device, &poolCI, nullptr, &g_GraphicsCommandPool)),
-      "vkCreateCommandPool");
-  }
-
-  return Result::Application(0);
-}
-
-Result InitVkCommandBuffers()
-{
-  g_GraphicsCommandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
-
-  {
-    VkCommandBufferAllocateInfo allocInfo = {};
-    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    allocInfo.commandPool = g_GraphicsCommandPool;
-    allocInfo.commandBufferCount = MAX_FRAMES_IN_FLIGHT;
-    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    RETURN_IF_FAILURE(Result::Vulkan(
-      vkAllocateCommandBuffers(g_Device, &allocInfo, g_GraphicsCommandBuffers.data())),
-      "vkAllocateCommandBuffers");
-  }
-
-  return Result::Application(0);
-}
-
-Result InitVkSemaphoresAndFences()
-{
-  VkSemaphoreCreateInfo semaphoreCI = {};
-  semaphoreCI.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-
-  g_ImageAvailableSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
-  g_RenderFinishedSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
-
-  for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
-  {
-    RETURN_IF_FAILURE(Result::Vulkan(
-      vkCreateSemaphore(g_Device, &semaphoreCI, nullptr, &g_ImageAvailableSemaphores[i])),
-      "");
-    RETURN_IF_FAILURE(Result::Vulkan(
-      vkCreateSemaphore(g_Device, &semaphoreCI, nullptr, &g_RenderFinishedSemaphores[i])),
-      "");
-  }
-
-  g_GraphicsCommandBufferIsUsedFences.resize(MAX_FRAMES_IN_FLIGHT);
-
-  VkFenceCreateInfo fenceCI = {};
-  fenceCI.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-  fenceCI.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-
-  for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
-  {
-    RETURN_IF_FAILURE(Result::Vulkan(
-      vkCreateFence(g_Device, &fenceCI, nullptr, &g_GraphicsCommandBufferIsUsedFences[i])),
-      "vkCreateFence");
-  }
-
-
-  return Result::Application(0);
-}
-
-Result InitVulkan()
-{
-  RETURN_IF_FAILURE(InitVkInstance(), "InitVkInstance");
-#ifndef NDEBUG
-  RETURN_IF_FAILURE(InitVkDebugMessenger(), "InitVkDebugMessenger");
-#endif
-  RETURN_IF_FAILURE(InitVkSurface(), "InitVkSurface");
-  RETURN_IF_FAILURE(InitVkPhysicalDevice(), "InitVkPhysicalDevice");
-  RETURN_IF_FAILURE(InitVkDevice(), "InitVkDevice");
-  RETURN_IF_FAILURE(InitVkSwapchain(), "InitVkSwapchain");
-  RETURN_IF_FAILURE(InitVkGraphicsPipeline(), "InitVkGraphicsPipeline");
-  RETURN_IF_FAILURE(InitVkSwapchainFramebuffers(), "InitVkSwapchainFramebuffers");
-  RETURN_IF_FAILURE(InitVkCommandPools(), "InitVkCommandPools");
-  RETURN_IF_FAILURE(InitVkCommandBuffers(), "InitVkCommandBuffers");
-  RETURN_IF_FAILURE(InitVkSemaphoresAndFences(), "InitVkSemaphoresAndFences");
-
-  return Result::Application(0);
-}
-
-Result Init()
-{
-  RETURN_IF_FAILURE(InitWindow(), "InitWindow");
-  RETURN_IF_FAILURE(InitVulkan(), "InitVulkan");
-  SDL_ShowWindow(g_Window);
-
-  return Result::Application(0);
-}
-
-void Shutdown()
-{
-  vkDeviceWaitIdle(g_Device);
-
-  for (VkFence fence : g_GraphicsCommandBufferIsUsedFences)
-  {
-    if (fence != VK_NULL_HANDLE)
-    {
-      vkDestroyFence(g_Device, fence, nullptr);
-    }
-  }
-  g_GraphicsCommandBufferIsUsedFences.clear();
-  
-  for (VkSemaphore semaphore : g_ImageAvailableSemaphores)
-  {
-    if (semaphore != VK_NULL_HANDLE)
-    {
-      vkDestroySemaphore(g_Device, semaphore, nullptr);
-    }
-  }
-  g_GraphicsCommandBufferIsUsedFences.clear();
-  
-  for (VkSemaphore semaphore : g_RenderFinishedSemaphores)
-  {
-    if (semaphore != VK_NULL_HANDLE)
-    {
-      vkDestroySemaphore(g_Device, semaphore, nullptr);
-    }
-  }
-  g_RenderFinishedSemaphores.clear();
-
-  g_GraphicsCommandBuffers.clear();
-
-  if (g_GraphicsCommandPool != VK_NULL_HANDLE)
-  {
-    vkDestroyCommandPool(g_Device, g_GraphicsCommandPool, nullptr);
-    g_GraphicsCommandPool = VK_NULL_HANDLE;
-  }
-
-  for (auto framebuffer : g_SwapchainFramebuffers)
-  {
-    if (framebuffer != VK_NULL_HANDLE)
-    {
-      vkDestroyFramebuffer(g_Device, framebuffer, nullptr);
-    }
-  }
-  g_SwapchainFramebuffers.clear();
-
   if (g_GraphicsPipeline != VK_NULL_HANDLE)
   {
     vkDestroyPipeline(g_Device, g_GraphicsPipeline, nullptr);
@@ -995,72 +925,220 @@ void Shutdown()
     vkDestroyShaderModule(g_Device, g_TriangleShaderFrag, nullptr);
     g_TriangleShaderFrag = VK_NULL_HANDLE;
   }
+}
 
-  for (VkImageView imageView : g_SwapchainImageViews)
+Result InitVkSwapchainFramebuffers()
+{
+  g_SwapchainFramebuffers.resize(g_SwapchainImageViews.size());
+
+  for (uint32_t i = 0; i < (uint32_t)g_SwapchainImageViews.size(); i++)
   {
-    if (imageView != VK_NULL_HANDLE)
+    VkFramebufferCreateInfo framebufferCI = {};
+    framebufferCI.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    framebufferCI.renderPass = g_RenderPass;
+    framebufferCI.attachmentCount = 1;
+    framebufferCI.pAttachments = &g_SwapchainImageViews[i];
+    framebufferCI.width = g_SwapchainExtent.width;
+    framebufferCI.height = g_SwapchainExtent.height;
+    framebufferCI.layers = 1;
+    RETURN_IF_FAILURE(Result::Vulkan(
+      vkCreateFramebuffer(g_Device, &framebufferCI, nullptr, &g_SwapchainFramebuffers[i])),
+      "vkCreateFramebuffer");
+  }
+
+  return Result::Application(0);
+}
+
+void DestroyVkSwapchainFramebuffers()
+{
+  for (auto framebuffer : g_SwapchainFramebuffers)
+  {
+    if (framebuffer != VK_NULL_HANDLE)
     {
-      vkDestroyImageView(g_Device, imageView, nullptr);
+      vkDestroyFramebuffer(g_Device, framebuffer, nullptr);
     }
   }
-  g_SwapchainImageViews.clear();
+  g_SwapchainFramebuffers.clear();
+}
 
-  g_SwapchainImages.clear();
 
-  if (g_Swapchain != VK_NULL_HANDLE)
+Result InitVkCommandPools()
+{
   {
-    vkDestroySwapchainKHR(g_Device, g_Swapchain, nullptr);
-    g_Swapchain = VK_NULL_HANDLE;
+    VkCommandPoolCreateInfo poolCI = {};
+    poolCI.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolCI.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    poolCI.queueFamilyIndex = g_GraphicsQueueFamily;
+    RETURN_IF_FAILURE(Result::Vulkan(
+      vkCreateCommandPool(g_Device, &poolCI, nullptr, &g_GraphicsCommandPool)),
+      "vkCreateCommandPool");
   }
 
-  if (g_Surface != VK_NULL_HANDLE)
+  return Result::Application(0);
+}
+
+void DestroyVkCommandPools()
+{
+  if (g_GraphicsCommandPool != VK_NULL_HANDLE)
   {
-    vkDestroySurfaceKHR(g_Instance, g_Surface, nullptr);
-    g_Surface = VK_NULL_HANDLE;
+    vkDestroyCommandPool(g_Device, g_GraphicsCommandPool, nullptr);
+    g_GraphicsCommandPool = VK_NULL_HANDLE;
+  }
+}
+
+Result InitVkCommandBuffers()
+{
+  g_GraphicsCommandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+
+  {
+    VkCommandBufferAllocateInfo allocInfo = {};
+    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocInfo.commandPool = g_GraphicsCommandPool;
+    allocInfo.commandBufferCount = MAX_FRAMES_IN_FLIGHT;
+    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    RETURN_IF_FAILURE(Result::Vulkan(
+      vkAllocateCommandBuffers(g_Device, &allocInfo, g_GraphicsCommandBuffers.data())),
+      "vkAllocateCommandBuffers");
   }
 
-  g_GraphicsQueue = VK_NULL_HANDLE;
-  g_PresentQueue = VK_NULL_HANDLE;
+  return Result::Application(0);
+}
 
-  if (g_Device != VK_NULL_HANDLE)
+void DestroyVkCommandBuffers()
+{
+  g_GraphicsCommandBuffers.clear();
+}
+
+Result InitVkSemaphoresAndFences()
+{
+  VkSemaphoreCreateInfo semaphoreCI = {};
+  semaphoreCI.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+
+  g_ImageAvailableSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
+  g_RenderFinishedSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
+
+  for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
   {
-    vkDestroyDevice(g_Device, nullptr);
-    g_Device = VK_NULL_HANDLE;
+    RETURN_IF_FAILURE(Result::Vulkan(
+      vkCreateSemaphore(g_Device, &semaphoreCI, nullptr, &g_ImageAvailableSemaphores[i])),
+      "");
+    RETURN_IF_FAILURE(Result::Vulkan(
+      vkCreateSemaphore(g_Device, &semaphoreCI, nullptr, &g_RenderFinishedSemaphores[i])),
+      "");
   }
 
-  g_PresentQueueFamily = (uint32_t)-1;
-  g_GraphicsQueueFamily = (uint32_t)-1;
-  g_TransferQueueFamily = (uint32_t)-1;
-  g_ComputeQueueFamily = (uint32_t)-1;
-  g_PhysicalDevice = VK_NULL_HANDLE;
+  g_GraphicsCommandBufferIsUsedFences.resize(MAX_FRAMES_IN_FLIGHT);
 
-  if (g_DebugMessenger != VK_NULL_HANDLE)
+  VkFenceCreateInfo fenceCI = {};
+  fenceCI.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+  fenceCI.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+
+  for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
   {
-    auto func = (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(
-      g_Instance, "vkDestroyDebugUtilsMessengerEXT");
-    if (func)
+    RETURN_IF_FAILURE(Result::Vulkan(
+      vkCreateFence(g_Device, &fenceCI, nullptr, &g_GraphicsCommandBufferIsUsedFences[i])),
+      "vkCreateFence");
+  }
+
+  return Result::Application(0);
+}
+
+void DestroyVkSemaphoresAndFences()
+{
+  for (VkFence fence : g_GraphicsCommandBufferIsUsedFences)
+  {
+    if (fence != VK_NULL_HANDLE)
     {
-      func(g_Instance, g_DebugMessenger, nullptr);
+      vkDestroyFence(g_Device, fence, nullptr);
     }
-
-    g_DebugMessenger = VK_NULL_HANDLE;
   }
+  g_GraphicsCommandBufferIsUsedFences.clear();
 
-  if (g_Instance != VK_NULL_HANDLE)
+  for (VkSemaphore semaphore : g_ImageAvailableSemaphores)
   {
-    vkDestroyInstance(g_Instance, nullptr);
-    g_Instance = VK_NULL_HANDLE;
+    if (semaphore != VK_NULL_HANDLE)
+    {
+      vkDestroySemaphore(g_Device, semaphore, nullptr);
+    }
   }
+  g_GraphicsCommandBufferIsUsedFences.clear();
 
-  SDL_DestroyWindow(g_Window);
-  g_Window = nullptr;
+  for (VkSemaphore semaphore : g_RenderFinishedSemaphores)
+  {
+    if (semaphore != VK_NULL_HANDLE)
+    {
+      vkDestroySemaphore(g_Device, semaphore, nullptr);
+    }
+  }
+  g_RenderFinishedSemaphores.clear();
+}
+
+Result InitVulkan()
+{
+  RETURN_IF_FAILURE(InitVkInstance(), "InitVkInstance");
+#ifndef NDEBUG
+  RETURN_IF_FAILURE(InitVkDebugMessenger(), "InitVkDebugMessenger");
+#endif
+  RETURN_IF_FAILURE(InitVkSurface(), "InitVkSurface");
+  RETURN_IF_FAILURE(InitVkPhysicalDevice(), "InitVkPhysicalDevice");
+  RETURN_IF_FAILURE(InitVkDevice(), "InitVkDevice");
+  RETURN_IF_FAILURE(InitVkSwapchain(), "InitVkSwapchain");
+  RETURN_IF_FAILURE(InitVkGraphicsPipeline(), "InitVkGraphicsPipeline");
+  RETURN_IF_FAILURE(InitVkSwapchainFramebuffers(), "InitVkSwapchainFramebuffers");
+  RETURN_IF_FAILURE(InitVkCommandPools(), "InitVkCommandPools");
+  RETURN_IF_FAILURE(InitVkCommandBuffers(), "InitVkCommandBuffers");
+  RETURN_IF_FAILURE(InitVkSemaphoresAndFences(), "InitVkSemaphoresAndFences");
+
+  return Result::Application(0);
+}
+
+Result Init()
+{
+  RETURN_IF_FAILURE(InitWindow(), "InitWindow");
+  RETURN_IF_FAILURE(InitVulkan(), "InitVulkan");
+  SDL_ShowWindow(g_Window);
+
+  return Result::Application(0);
+}
+
+void Shutdown()
+{
+  vkDeviceWaitIdle(g_Device);
+
+  DestroyVkSemaphoresAndFences();
+  DestroyVkCommandBuffers();
+  DestroyVkCommandPools();
+  DestroyVkSwapchainFramebuffers();
+  DestroyVkGraphicsPipeline();
+  DestroyVkSwapchain();
+  DestroyVkDevice();
+  DestroyVkPhysicalDevice();
+  DestroyVkSurface();
+  DestroyVkDebugMessenger();
+  DestroyVkInstance();
+  DestroyWindow();
 
   SDL_Quit();
 }
 
+Result RecreateSwapchain()
+{
+  vkDeviceWaitIdle(g_Device);
+
+  DestroyVkSwapchainFramebuffers();
+  DestroyVkGraphicsPipeline();
+  DestroyVkSwapchain();
+
+  RETURN_IF_FAILURE(InitVkSwapchain(), "InitVkSwapchain");
+  RETURN_IF_FAILURE(InitVkGraphicsPipeline(), "InitVkGraphicsPipeline");
+  RETURN_IF_FAILURE(InitVkSwapchainFramebuffers(), "InitVkSwapchainFramebuffers");
+
+  return Result::Application(0);
+}
+
 float g_WorldTime = 0.0f;
 
-Result VkWriteCommandBuffers(uint32_t swapchainImageIndex)
+Result WriteCommandBuffers(uint32_t swapchainImageIndex)
 {
   RETURN_IF_FAILURE(Result::Vulkan(
     vkResetCommandBuffer(g_GraphicsCommandBuffers[g_CurrentFrame], 0)),
@@ -1108,9 +1186,16 @@ Result VkWriteCommandBuffers(uint32_t swapchainImageIndex)
 Result Render(float normalizedDelay)
 {
   uint32_t imageIndex;
-  RETURN_IF_FAILURE(Result::Vulkan(
-    vkAcquireNextImageKHR(g_Device, g_Swapchain, (uint64_t)-1, g_ImageAvailableSemaphores[g_CurrentFrame], VK_NULL_HANDLE, &imageIndex)),
-    "vkAcquireNextImageKHR");
+  Result acquireNextImage = Result::Vulkan(
+    vkAcquireNextImageKHR(g_Device, g_Swapchain, (uint64_t)-1, g_ImageAvailableSemaphores[g_CurrentFrame], VK_NULL_HANDLE, &imageIndex));
+  if (acquireNextImage.vkResult == VK_ERROR_OUT_OF_DATE_KHR)
+  {
+    acquireNextImage = RecreateSwapchain();
+  }
+  if (acquireNextImage.vkResult != VK_SUBOPTIMAL_KHR)
+  {
+    RETURN_IF_FAILURE(acquireNextImage, "vkAcquireNextImageKHR");
+  }
 
   RETURN_IF_FAILURE(Result::Vulkan(
     vkWaitForFences(g_Device, 1, &g_GraphicsCommandBufferIsUsedFences[g_CurrentFrame], VK_TRUE, (uint64_t)-1)),
@@ -1118,7 +1203,7 @@ Result Render(float normalizedDelay)
   RETURN_IF_FAILURE(Result::Vulkan(
     vkResetFences(g_Device, 1, &g_GraphicsCommandBufferIsUsedFences[g_CurrentFrame])),
     "vkResetFences");
-  RETURN_IF_FAILURE(VkWriteCommandBuffers(imageIndex),
+  RETURN_IF_FAILURE(WriteCommandBuffers(imageIndex),
                     "VkWriteCommandBuffers");
 
   VkPipelineStageFlags waitStages[] = {
@@ -1146,9 +1231,16 @@ Result Render(float normalizedDelay)
   presentInfo.pWaitSemaphores = &g_RenderFinishedSemaphores[g_CurrentFrame];
   presentInfo.pImageIndices = &imageIndex;
 
-  RETURN_IF_FAILURE(Result::Vulkan(
-    vkQueuePresentKHR(g_PresentQueue, &presentInfo)),
-    "vkQueuePresentKHR");
+  Result queuePresent = Result::Vulkan(
+    vkQueuePresentKHR(g_PresentQueue, &presentInfo));
+  if (queuePresent.vkResult == VK_ERROR_OUT_OF_DATE_KHR)
+  {
+    queuePresent = RecreateSwapchain();
+  }
+  if (queuePresent.vkResult != VK_SUBOPTIMAL_KHR)
+  {
+    RETURN_IF_FAILURE(queuePresent, "vkQueuePresentKHR");
+  }
 
   g_CurrentFrame = (g_CurrentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
 
@@ -1177,8 +1269,21 @@ void Loop()
         switch (event.window.event)
         {
           case SDL_WINDOWEVENT_CLOSE:
-          event.type = SDL_QUIT;
-          SDL_PushEvent(&event);
+          {
+            event.type = SDL_QUIT;
+            SDL_PushEvent(&event);
+          }
+          break;
+          case SDL_WINDOWEVENT_RESIZED:
+          {
+            int w = event.window.data1;
+            int h = event.window.data2;
+            g_WindowWidth = (uint32_t)w;
+            g_WindowHeight = (uint32_t)h;
+            SDL_Vulkan_GetDrawableSize(g_Window, &w, &h);
+            g_DrawableWidth = (uint32_t)w;
+            g_DrawableHeight = (uint32_t)h;
+          }
         }
         break;
 

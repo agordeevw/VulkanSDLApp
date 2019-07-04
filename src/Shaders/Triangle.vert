@@ -7,10 +7,13 @@ layout(push_constant) uniform PushConstants {
 	float time;
 };
 
+#define SQRT3 1.73205080757
+#define R 0.5
+
 vec2 positions[3] = vec2[](
   vec2(0.0, -0.5),
-  vec2(0.5, 0.5),
-  vec2(-0.5, 0.5)
+  vec2(R * 0.5 * SQRT3, R * 0.5),
+  vec2(-R * 0.5 * SQRT3, R * 0.5)
 );
 
 vec3 colors[3] = vec3[](
