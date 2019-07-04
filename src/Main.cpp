@@ -83,6 +83,7 @@ static uint32_t g_WindowWidth = 600;
 static uint32_t g_WindowHeight = 600;
 static uint32_t g_DrawableWidth;
 static uint32_t g_DrawableHeight;
+static bool g_DrawableChanged = false;
 
 Result InitWindow()
 {
@@ -961,7 +962,6 @@ void DestroyVkSwapchainFramebuffers()
   g_SwapchainFramebuffers.clear();
 }
 
-
 Result InitVkCommandPools()
 {
   {
@@ -1191,11 +1191,9 @@ Result Render(float normalizedDelay)
   if (acquireNextImage.vkResult == VK_ERROR_OUT_OF_DATE_KHR)
   {
     acquireNextImage = RecreateSwapchain();
+    g_DrawableChanged = false;
   }
-  if (acquireNextImage.vkResult != VK_SUBOPTIMAL_KHR)
-  {
-    RETURN_IF_FAILURE(acquireNextImage, "vkAcquireNextImageKHR");
-  }
+  RETURN_IF_FAILURE(acquireNextImage, "vkAcquireNextImageKHR");
 
   RETURN_IF_FAILURE(Result::Vulkan(
     vkWaitForFences(g_Device, 1, &g_GraphicsCommandBufferIsUsedFences[g_CurrentFrame], VK_TRUE, (uint64_t)-1)),
@@ -1233,14 +1231,14 @@ Result Render(float normalizedDelay)
 
   Result queuePresent = Result::Vulkan(
     vkQueuePresentKHR(g_PresentQueue, &presentInfo));
-  if (queuePresent.vkResult == VK_ERROR_OUT_OF_DATE_KHR)
+  if (g_DrawableChanged
+      || queuePresent.vkResult == VK_ERROR_OUT_OF_DATE_KHR
+      || queuePresent.vkResult == VK_SUBOPTIMAL_KHR)
   {
     queuePresent = RecreateSwapchain();
+    g_DrawableChanged = false;
   }
-  if (queuePresent.vkResult != VK_SUBOPTIMAL_KHR)
-  {
-    RETURN_IF_FAILURE(queuePresent, "vkQueuePresentKHR");
-  }
+  RETURN_IF_FAILURE(queuePresent, "vkQueuePresentKHR");
 
   g_CurrentFrame = (g_CurrentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
 
@@ -1253,6 +1251,8 @@ void Loop()
   const float MS_PER_LOOP_ITERATION = 1.0f / 60.0f * 1000.0f;
   const float MS_PER_UPDATE = 1.0f / 60.0f * 1000.0f;
   const int MAX_UPDATES_PER_FRAME = 4;
+
+  bool windowVisible = true;
 
   uint64_t previous = SDL_GetPerformanceCounter();
   float lag = 0.0f;
@@ -1283,7 +1283,21 @@ void Loop()
             SDL_Vulkan_GetDrawableSize(g_Window, &w, &h);
             g_DrawableWidth = (uint32_t)w;
             g_DrawableHeight = (uint32_t)h;
+            g_DrawableChanged = true;
           }
+          break;
+          case SDL_WINDOWEVENT_MINIMIZED:
+          case SDL_WINDOWEVENT_HIDDEN:
+          {
+            windowVisible = false;
+          }
+          break;
+          case SDL_WINDOWEVENT_SHOWN:
+          case SDL_WINDOWEVENT_RESTORED:
+          {
+            windowVisible = true;
+          }
+          break;
         }
         break;
 
@@ -1319,12 +1333,15 @@ void Loop()
       numUpdates++;
     }
 
-    float renderDelay = lag / MS_PER_UPDATE; // normalized in range [0, 1)
-    Result renderResult = Render(renderDelay);
-    if (!renderResult.Success())
+    if (windowVisible && g_WindowWidth > 0 && g_WindowHeight > 0)
     {
-      event.type = SDL_QUIT;
-      SDL_PushEvent(&event);
+      float renderDelay = lag / MS_PER_UPDATE; // normalized in range [0, 1)
+      Result renderResult = Render(renderDelay);
+      if (!renderResult.Success())
+      {
+        event.type = SDL_QUIT;
+        SDL_PushEvent(&event);
+      }
     }
 
     uint64_t loopIterationEnd = SDL_GetPerformanceCounter();
