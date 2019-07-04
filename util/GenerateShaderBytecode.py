@@ -15,7 +15,7 @@ for filename in oldHeaders:
 	os.remove(f"{rootdir}/src/ShaderBytecode/{filename}")
 
 def isShader(filepath):
-	shaderTypes = {".hlsl"}
+	shaderTypes = {".vert", ".frag"}
 	suffixes = Path(filepath).suffixes
 	if len(suffixes) > 0:
 		return suffixes[-1] in shaderTypes
