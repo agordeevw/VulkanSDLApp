@@ -6,10 +6,37 @@
 #include "SDL.h"
 #include "SDL_vulkan.h"
 #include "glm/glm.hpp"
+#include "glm/geometric.hpp"
+#include "glm/gtc/matrix_transform.hpp"
 
 #include "ShaderBytecode/Triangle.vert.h"
 #include "ShaderBytecode/Triangle.frag.h"
-#include "Main.h"
+
+struct Vertex
+{
+  glm::vec2 pos;
+  glm::vec3 color;
+};
+
+static Vertex g_VertexBuffer[] = {
+  {{-0.5f,  0.5f},  {1.0f, 1.0f, 1.0f}}, // left-top
+  {{0.5f,   0.5f},  {0.0f, 0.0f, 1.0f}}, // right-top
+  {{0.5f,   -0.5f}, {0.0f, 1.0f, 0.0f}}, // right-bottom
+  {{-0.5f,  -0.5f}, {1.0f, 0.0f, 0.0f}}, // left-bottom
+};
+
+static uint32_t g_IndexBuffer[] = {
+  0, 1, 2, 0, 2, 3
+};
+
+static struct UniformBuffer
+{
+  alignas(16) glm::mat4x4 model;
+  alignas(16) glm::mat4x4 view;
+  alignas(16) glm::mat4x4 proj;
+} g_UniformBuffer;
+
+static const uint32_t MAX_FRAMES_IN_FLIGHT = 2;
 
 struct Result
 {
@@ -115,66 +142,8 @@ void DestroyWindow()
   g_Window = nullptr;
 }
 
+// Instance
 static VkInstance g_Instance = VK_NULL_HANDLE;
-static VkDebugUtilsMessengerEXT g_DebugMessenger = VK_NULL_HANDLE;
-static VkSurfaceKHR g_Surface = VK_NULL_HANDLE;
-static VkPhysicalDevice g_PhysicalDevice = VK_NULL_HANDLE;
-static uint32_t g_GraphicsQueueFamily = (uint32_t)-1;
-static uint32_t g_TransferQueueFamily = (uint32_t)-1;
-static uint32_t g_ComputeQueueFamily = (uint32_t)-1;
-static uint32_t g_PresentQueueFamily = (uint32_t)-1;
-static VkDevice g_Device = VK_NULL_HANDLE;
-static VkQueue g_GraphicsQueue = VK_NULL_HANDLE;
-static VkQueue g_TransferQueue = VK_NULL_HANDLE;
-static VkQueue g_PresentQueue = VK_NULL_HANDLE;
-static VkSwapchainKHR g_Swapchain = VK_NULL_HANDLE;
-static VkFormat g_SwapchainFormat;
-static VkExtent2D g_SwapchainExtent;
-static std::vector<VkImage> g_SwapchainImages;
-static std::vector<VkImageView> g_SwapchainImageViews;
-static VkShaderModule g_TriangleShaderVert;
-static VkShaderModule g_TriangleShaderFrag;
-static VkPipelineCache g_PipelineCache;
-static VkPipelineLayout g_PipelineLayout;
-static VkRenderPass g_RenderPass;
-static VkPipeline g_GraphicsPipeline;
-static std::vector<VkFramebuffer> g_SwapchainFramebuffers;
-static VkCommandPool g_GraphicsCommandPool;
-static VkCommandPool g_TransferCommandPool;
-static std::vector<VkCommandBuffer> g_GraphicsCommandBuffers;
-static VkCommandBuffer g_TransferCommandBuffer;
-static VkDeviceMemory g_TriangleBufferMemory;
-static VkBuffer g_TriangleBuffer;
-static const uint32_t MAX_FRAMES_IN_FLIGHT = 2;
-static uint32_t g_CurrentFrame = 0;
-static std::vector<VkSemaphore> g_ImageAvailableSemaphores;
-static std::vector<VkSemaphore> g_RenderFinishedSemaphores;
-static std::vector<VkFence> g_GraphicsCommandBufferIsUsedFences;
-
-static VKAPI_ATTR VkBool32 VKAPI_CALL DebugCallback(
-  VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
-  VkDebugUtilsMessageTypeFlagsEXT messageType,
-  const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
-  void* pUserData)
-{
-  const char* severity = "";
-  switch (messageSeverity)
-  {
-    case VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT: severity = "INFO"; break;
-    case VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT: severity = "WARNING"; break;
-    case VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT: severity = "ERROR"; break;
-    case VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT: severity = "VERBOSE"; break;
-  }
-  const char* type = "";
-  switch (messageType)
-  {
-    case VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT: type = "GENERAL"; break;
-    case VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT: type = "VALIDATION"; break;
-    case VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT: type = "PERFORMANCE"; break;
-  }
-  fprintf(stderr, "Vk Validation [%s, %s]: %s\n", severity, type, pCallbackData->pMessage);
-  return VK_FALSE;
-}
 
 Result InitVkInstance()
 {
@@ -232,6 +201,34 @@ void DestroyVkInstance()
   }
 }
 
+// Debug messenger
+static VkDebugUtilsMessengerEXT g_DebugMessenger = VK_NULL_HANDLE;
+
+static VKAPI_ATTR VkBool32 VKAPI_CALL DebugCallback(
+  VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
+  VkDebugUtilsMessageTypeFlagsEXT messageType,
+  const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
+  void* pUserData)
+{
+  const char* severity = "";
+  switch (messageSeverity)
+  {
+    case VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT: severity = "INFO"; break;
+    case VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT: severity = "WARNING"; break;
+    case VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT: severity = "ERROR"; break;
+    case VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT: severity = "VERBOSE"; break;
+  }
+  const char* type = "";
+  switch (messageType)
+  {
+    case VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT: type = "GENERAL"; break;
+    case VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT: type = "VALIDATION"; break;
+    case VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT: type = "PERFORMANCE"; break;
+  }
+  fprintf(stderr, "Vk Validation [%s, %s]: %s\n", severity, type, pCallbackData->pMessage);
+  return VK_FALSE;
+}
+
 Result InitVkDebugMessenger()
 {
   VkDebugUtilsMessengerCreateInfoEXT ci = {};
@@ -277,6 +274,9 @@ void DestroyVkDebugMessenger()
   }
 }
 
+// Surface
+static VkSurfaceKHR g_Surface = VK_NULL_HANDLE;
+
 Result InitVkSurface()
 {
   return Result::Application(
@@ -291,6 +291,13 @@ void DestroyVkSurface()
     g_Surface = VK_NULL_HANDLE;
   }
 }
+
+// Physical device + queue families
+static VkPhysicalDevice g_PhysicalDevice = VK_NULL_HANDLE;
+static uint32_t g_GraphicsQueueFamily = (uint32_t)-1;
+static uint32_t g_TransferQueueFamily = (uint32_t)-1;
+static uint32_t g_ComputeQueueFamily = (uint32_t)-1;
+static uint32_t g_PresentQueueFamily = (uint32_t)-1;
 
 Result InitVkPhysicalDevice()
 {
@@ -447,6 +454,12 @@ void DestroyVkPhysicalDevice()
   g_PhysicalDevice = VK_NULL_HANDLE;
 }
 
+// Device + queues
+static VkDevice g_Device = VK_NULL_HANDLE;
+static VkQueue g_GraphicsQueue = VK_NULL_HANDLE;
+static VkQueue g_TransferQueue = VK_NULL_HANDLE;
+static VkQueue g_PresentQueue = VK_NULL_HANDLE;
+
 Result InitVkDevice()
 {
   std::vector<uint32_t> queueFamilies = {
@@ -526,6 +539,13 @@ void DestroyVkDevice()
     g_Device = VK_NULL_HANDLE;
   }
 }
+
+// Swapchain + image views
+static VkSwapchainKHR g_Swapchain = VK_NULL_HANDLE;
+static VkFormat g_SwapchainFormat;
+static VkExtent2D g_SwapchainExtent;
+static std::vector<VkImage> g_SwapchainImages;
+static std::vector<VkImageView> g_SwapchainImageViews;
 
 Result InitVkSwapchain()
 {
@@ -706,8 +726,13 @@ void DestroyVkSwapchain()
   }
 }
 
-Result InitVkGraphicsPipeline()
+// Shaders
+static VkShaderModule g_TriangleShaderVert;
+static VkShaderModule g_TriangleShaderFrag;
+
+Result InitVkShaders()
 {
+  // Fragment shader
   {
     VkShaderModuleCreateInfo ci = {};
     ci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -718,6 +743,7 @@ Result InitVkGraphicsPipeline()
       "vkCreateShaderModule");
   }
 
+  // Vertex shader
   {
     VkShaderModuleCreateInfo ci = {};
     ci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -728,12 +754,274 @@ Result InitVkGraphicsPipeline()
       "vkCreateShaderModule");
   }
 
-  VkPipelineCacheCreateInfo pipelineCacheCI = {};
-  pipelineCacheCI.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
-  RETURN_IF_FAILURE(Result::Vulkan(
-    vkCreatePipelineCache(g_Device, &pipelineCacheCI, nullptr, &g_PipelineCache)),
-    "vkCreatePipelineCache");
+  return Result::Application(0);
+}
 
+void DestroyVkShaders()
+{
+  if (g_TriangleShaderVert != VK_NULL_HANDLE)
+  {
+    vkDestroyShaderModule(g_Device, g_TriangleShaderVert, nullptr);
+    g_TriangleShaderVert = VK_NULL_HANDLE;
+  }
+
+  if (g_TriangleShaderFrag != VK_NULL_HANDLE)
+  {
+    vkDestroyShaderModule(g_Device, g_TriangleShaderFrag, nullptr);
+    g_TriangleShaderFrag = VK_NULL_HANDLE;
+  }
+}
+
+// Descriptor pool
+static VkDescriptorPool g_DescriptorPool;
+
+Result InitVkDescriptorPool()
+{
+  VkDescriptorPoolSize poolSizes[] = {
+    {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1024}
+  };
+
+  VkDescriptorPoolCreateInfo ci = {};
+  ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+  ci.maxSets = 1024;
+  ci.poolSizeCount = sizeof(poolSizes) / sizeof(poolSizes[0]);
+  ci.pPoolSizes = poolSizes;
+  RETURN_IF_FAILURE(Result::Vulkan(
+    vkCreateDescriptorPool(g_Device, &ci, nullptr, &g_DescriptorPool)),
+    "vkCreateDescriptorPool");
+
+  return Result::Application(0);
+}
+
+void DestroyVkDescriptorPool()
+{
+  if (g_DescriptorPool != VK_NULL_HANDLE)
+  {
+    vkDestroyDescriptorPool(g_Device, g_DescriptorPool, nullptr);
+    g_DescriptorPool = VK_NULL_HANDLE;
+  }
+}
+
+// Descriptor set layout
+static VkDescriptorSetLayout g_DescriptorSetLayouts[MAX_FRAMES_IN_FLIGHT];
+
+Result InitVkDescriptorSetLayout()
+{
+  VkDescriptorSetLayoutBinding binding = {};
+  binding.binding = 0;
+  binding.descriptorCount = 1;
+  binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+  binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+  VkDescriptorSetLayoutCreateInfo ci = {};
+  ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+  ci.bindingCount = 1;
+  ci.pBindings = &binding;
+  for (VkDescriptorSetLayout& layout : g_DescriptorSetLayouts)
+  {
+    VkResult res = vkCreateDescriptorSetLayout(g_Device, &ci, nullptr, &layout);
+    RETURN_IF_FAILURE(Result::Vulkan(res), "vkCreateDescriptorSetLayout");
+  }
+  return Result::Application(0);
+}
+
+void DestroyVkDescriptorSetLayout()
+{
+  for (VkDescriptorSetLayout& layout : g_DescriptorSetLayouts)
+  {
+    if (layout != VK_NULL_HANDLE)
+    {
+      vkDestroyDescriptorSetLayout(g_Device, layout, nullptr);
+      layout = VK_NULL_HANDLE;
+    }
+  }
+}
+
+// Descriptor sets (per frame)
+static VkDescriptorSet g_DescriptorSets[MAX_FRAMES_IN_FLIGHT];
+
+Result InitVkDescriptorSets()
+{
+  VkDescriptorSetAllocateInfo info = {};
+  info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+  info.descriptorPool = g_DescriptorPool;
+  info.descriptorSetCount = MAX_FRAMES_IN_FLIGHT;
+  info.pSetLayouts = g_DescriptorSetLayouts;
+
+  VkResult res = vkAllocateDescriptorSets(g_Device, &info, g_DescriptorSets);
+  RETURN_IF_FAILURE(Result::Vulkan(res), "vkAllocateDescriptorSets");
+  return Result::Application(0);
+}
+
+void DestroyVkDescriptorSets()
+{
+  for (VkDescriptorSet& set : g_DescriptorSets)
+  {
+    set = VK_NULL_HANDLE;
+  }
+  vkResetDescriptorPool(g_Device, g_DescriptorPool, 0);
+}
+
+// Pipeline cache
+static VkPipelineCache g_PipelineCache;
+
+Result InitVkPipelineCache()
+{
+  // Pipeline cache
+  {
+    VkPipelineCacheCreateInfo pipelineCacheCI = {};
+    pipelineCacheCI.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+    RETURN_IF_FAILURE(Result::Vulkan(
+      vkCreatePipelineCache(g_Device, &pipelineCacheCI, nullptr, &g_PipelineCache)),
+      "vkCreatePipelineCache");
+  }
+
+  return Result::Application(0);
+}
+
+void DestroyVkPipelineCache()
+{
+  if (g_PipelineCache != VK_NULL_HANDLE)
+  {
+    vkDestroyPipelineCache(g_Device, g_PipelineCache, nullptr);
+    g_PipelineCache = VK_NULL_HANDLE;
+  }
+}
+
+// Pipeline layout
+static VkPipelineLayout g_PipelineLayout;
+
+Result InitVkPipelineLayout()
+{
+  // Pipeline layout
+  {
+    VkPushConstantRange pushConstantRange = {};
+    pushConstantRange.size = sizeof(float);
+    pushConstantRange.offset = 0;
+    pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+    VkPipelineLayoutCreateInfo pipelineLayoutCI = {};
+    pipelineLayoutCI.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipelineLayoutCI.pushConstantRangeCount = 1;
+    pipelineLayoutCI.pPushConstantRanges = &pushConstantRange;
+    pipelineLayoutCI.setLayoutCount = MAX_FRAMES_IN_FLIGHT;
+    pipelineLayoutCI.pSetLayouts = g_DescriptorSetLayouts;
+
+    RETURN_IF_FAILURE(Result::Vulkan(
+      vkCreatePipelineLayout(g_Device, &pipelineLayoutCI, nullptr, &g_PipelineLayout)),
+      "vkCreatePipelineLayout");
+  }
+
+  return Result::Application(0);
+}
+
+void DestroyVkPipelineLayout()
+{
+  if (g_PipelineLayout != VK_NULL_HANDLE)
+  {
+    vkDestroyPipelineLayout(g_Device, g_PipelineLayout, nullptr);
+    g_PipelineLayout = VK_NULL_HANDLE;
+  }
+}
+
+// Render pass
+static VkRenderPass g_RenderPass;
+
+Result InitVkRenderPass()
+{
+  VkAttachmentDescription colorAttachment = {};
+  colorAttachment.format = g_SwapchainFormat;
+  colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+  colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+  colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+  colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+  VkAttachmentReference colorAttachmentRef = {};
+  colorAttachmentRef.attachment = 0;
+  colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+  VkSubpassDescription subpass = {};
+  subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  subpass.colorAttachmentCount = 1;
+  subpass.pColorAttachments = &colorAttachmentRef;
+
+  VkSubpassDependency dependency = {};
+  dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+  dependency.dstSubpass = 0;
+  dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+  dependency.srcAccessMask = 0;
+  dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+  dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
+
+  VkRenderPassCreateInfo renderPassCI = {};
+  renderPassCI.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+  renderPassCI.attachmentCount = 1;
+  renderPassCI.pAttachments = &colorAttachment;
+  renderPassCI.subpassCount = 1;
+  renderPassCI.pSubpasses = &subpass;
+  renderPassCI.dependencyCount = 1;
+  renderPassCI.pDependencies = &dependency;
+  RETURN_IF_FAILURE(Result::Vulkan(
+    vkCreateRenderPass(g_Device, &renderPassCI, nullptr, &g_RenderPass)),
+    "vkCreateRenderPass");
+
+  return Result::Application(0);
+}
+
+void DestroyVkRenderPass()
+{
+  if (g_RenderPass != VK_NULL_HANDLE)
+  {
+    vkDestroyRenderPass(g_Device, g_RenderPass, nullptr);
+    g_RenderPass = VK_NULL_HANDLE;
+  }
+}
+
+// Framebuffers
+static std::vector<VkFramebuffer> g_SwapchainFramebuffers;
+
+Result InitVkSwapchainFramebuffers()
+{
+  g_SwapchainFramebuffers.resize(g_SwapchainImageViews.size());
+
+  for (uint32_t i = 0; i < (uint32_t)g_SwapchainImageViews.size(); i++)
+  {
+    VkFramebufferCreateInfo framebufferCI = {};
+    framebufferCI.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    framebufferCI.renderPass = g_RenderPass;
+    framebufferCI.attachmentCount = 1;
+    framebufferCI.pAttachments = &g_SwapchainImageViews[i];
+    framebufferCI.width = g_SwapchainExtent.width;
+    framebufferCI.height = g_SwapchainExtent.height;
+    framebufferCI.layers = 1;
+    RETURN_IF_FAILURE(Result::Vulkan(
+      vkCreateFramebuffer(g_Device, &framebufferCI, nullptr, &g_SwapchainFramebuffers[i])),
+      "vkCreateFramebuffer");
+  }
+
+  return Result::Application(0);
+}
+
+void DestroyVkSwapchainFramebuffers()
+{
+  for (auto framebuffer : g_SwapchainFramebuffers)
+  {
+    if (framebuffer != VK_NULL_HANDLE)
+    {
+      vkDestroyFramebuffer(g_Device, framebuffer, nullptr);
+    }
+  }
+  g_SwapchainFramebuffers.clear();
+}
+
+// Pipelines
+static VkPipeline g_GraphicsPipeline;
+
+Result InitVkGraphicsPipeline()
+{
   VkPipelineShaderStageCreateInfo shaderStageCIs[2];
   shaderStageCIs[0] = {};
   shaderStageCIs[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -835,59 +1123,6 @@ Result InitVkGraphicsPipeline()
   dynamicStateCI.dynamicStateCount = 1;
   dynamicStateCI.pDynamicStates = &dynamicState;
 
-  VkPushConstantRange pushConstantRange = {};
-  pushConstantRange.size = sizeof(float);
-  pushConstantRange.offset = 0;
-  pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-
-  VkPipelineLayoutCreateInfo pipelineLayoutCI = {};
-  pipelineLayoutCI.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-  pipelineLayoutCI.pushConstantRangeCount = 1;
-  pipelineLayoutCI.pPushConstantRanges = &pushConstantRange;
-
-  RETURN_IF_FAILURE(Result::Vulkan(
-    vkCreatePipelineLayout(g_Device, &pipelineLayoutCI, nullptr, &g_PipelineLayout)),
-    "vkCreatePipelineLayout");
-
-  VkAttachmentDescription colorAttachment = {};
-  colorAttachment.format = g_SwapchainFormat;
-  colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-  colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-  colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-  colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-  colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-  colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-  colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-
-  VkAttachmentReference colorAttachmentRef = {};
-  colorAttachmentRef.attachment = 0;
-  colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-  VkSubpassDescription subpass = {};
-  subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-  subpass.colorAttachmentCount = 1;
-  subpass.pColorAttachments = &colorAttachmentRef;
-
-  VkSubpassDependency dependency = {};
-  dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
-  dependency.dstSubpass = 0;
-  dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-  dependency.srcAccessMask = 0;
-  dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-  dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
-
-  VkRenderPassCreateInfo renderPassCI = {};
-  renderPassCI.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-  renderPassCI.attachmentCount = 1;
-  renderPassCI.pAttachments = &colorAttachment;
-  renderPassCI.subpassCount = 1;
-  renderPassCI.pSubpasses = &subpass;
-  renderPassCI.dependencyCount = 1;
-  renderPassCI.pDependencies = &dependency;
-  RETURN_IF_FAILURE(Result::Vulkan(
-    vkCreateRenderPass(g_Device, &renderPassCI, nullptr, &g_RenderPass)),
-    "vkCreateRenderPass");
-
   VkGraphicsPipelineCreateInfo pipelineCI = {};
   pipelineCI.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
   pipelineCI.stageCount = 2;
@@ -919,71 +1154,11 @@ void DestroyVkGraphicsPipeline()
     vkDestroyPipeline(g_Device, g_GraphicsPipeline, nullptr);
     g_GraphicsPipeline = VK_NULL_HANDLE;
   }
-
-  if (g_RenderPass != VK_NULL_HANDLE)
-  {
-    vkDestroyRenderPass(g_Device, g_RenderPass, nullptr);
-    g_RenderPass = VK_NULL_HANDLE;
-  }
-
-  if (g_PipelineLayout != VK_NULL_HANDLE)
-  {
-    vkDestroyPipelineLayout(g_Device, g_PipelineLayout, nullptr);
-    g_PipelineLayout = VK_NULL_HANDLE;
-  }
-
-  if (g_PipelineCache != VK_NULL_HANDLE)
-  {
-    vkDestroyPipelineCache(g_Device, g_PipelineCache, nullptr);
-    g_PipelineCache = VK_NULL_HANDLE;
-  }
-
-  if (g_TriangleShaderVert != VK_NULL_HANDLE)
-  {
-    vkDestroyShaderModule(g_Device, g_TriangleShaderVert, nullptr);
-    g_TriangleShaderVert = VK_NULL_HANDLE;
-  }
-
-  if (g_TriangleShaderFrag != VK_NULL_HANDLE)
-  {
-    vkDestroyShaderModule(g_Device, g_TriangleShaderFrag, nullptr);
-    g_TriangleShaderFrag = VK_NULL_HANDLE;
-  }
 }
 
-Result InitVkSwapchainFramebuffers()
-{
-  g_SwapchainFramebuffers.resize(g_SwapchainImageViews.size());
-
-  for (uint32_t i = 0; i < (uint32_t)g_SwapchainImageViews.size(); i++)
-  {
-    VkFramebufferCreateInfo framebufferCI = {};
-    framebufferCI.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-    framebufferCI.renderPass = g_RenderPass;
-    framebufferCI.attachmentCount = 1;
-    framebufferCI.pAttachments = &g_SwapchainImageViews[i];
-    framebufferCI.width = g_SwapchainExtent.width;
-    framebufferCI.height = g_SwapchainExtent.height;
-    framebufferCI.layers = 1;
-    RETURN_IF_FAILURE(Result::Vulkan(
-      vkCreateFramebuffer(g_Device, &framebufferCI, nullptr, &g_SwapchainFramebuffers[i])),
-      "vkCreateFramebuffer");
-  }
-
-  return Result::Application(0);
-}
-
-void DestroyVkSwapchainFramebuffers()
-{
-  for (auto framebuffer : g_SwapchainFramebuffers)
-  {
-    if (framebuffer != VK_NULL_HANDLE)
-    {
-      vkDestroyFramebuffer(g_Device, framebuffer, nullptr);
-    }
-  }
-  g_SwapchainFramebuffers.clear();
-}
+// Command pools
+static VkCommandPool g_GraphicsCommandPool;
+static VkCommandPool g_TransferCommandPool;
 
 Result InitVkCommandPools()
 {
@@ -1020,6 +1195,10 @@ void DestroyVkCommandPools()
   }
 }
 
+// Command buffers
+static std::vector<VkCommandBuffer> g_GraphicsCommandBuffers;
+static VkCommandBuffer g_TransferCommandBuffer;
+
 Result InitVkCommandBuffers()
 {
   g_GraphicsCommandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
@@ -1055,25 +1234,41 @@ void DestroyVkCommandBuffers()
   g_GraphicsCommandBuffers.clear();
 }
 
+// Buffers
+static VkDeviceMemory g_TriangleBufferMemory;
+static VkBuffer g_TriangleBuffer;
+static uint64_t g_TriangleBufferVertexOffset;
+static uint64_t g_TriangleBufferIndexOffset;
+static uint64_t g_TriangleBufferUniformOffset;
+
 Result InitVkTriangleBuffer()
 {
-  std::vector<float> vertexData = {
-    // x                  y       r     g     b
-    0.0f,                 -0.5f,  1.0f, 0.0f, 0.0f,
-    sqrtf(3.0f) * 0.25f,  0.25f,  0.0f, 1.0f, 0.0f,
-    -sqrtf(3.0f) * 0.25f, 0.25f,  0.0f, 0.0f, 1.0f,
-    -0.75f,               0.0f,   0.5f, 0.5f, 0.5f,
-    0.75f,                0.0f,   0.5f, 0.5f, 0.5f, 
-  };
+  VkPhysicalDeviceProperties deviceProperties;
+  vkGetPhysicalDeviceProperties(g_PhysicalDevice, &deviceProperties);
+  VkDeviceSize minAlignment = deviceProperties.limits.minUniformBufferOffsetAlignment;
 
-  std::vector<uint32_t> indexData = {
-    0, 1, 2, 0, 2, 3, 0, 4, 1
-  };
+  g_TriangleBufferVertexOffset = 0;
+  g_TriangleBufferIndexOffset = sizeof(g_VertexBuffer);
+  g_TriangleBufferUniformOffset = (uint32_t)((sizeof(g_VertexBuffer) + sizeof(g_IndexBuffer) + (minAlignment - 1)) / minAlignment * minAlignment);
+  uint64_t padding = g_TriangleBufferUniformOffset - (sizeof(g_VertexBuffer) + sizeof(g_IndexBuffer));
 
-  uint32_t bufferSize = (uint32_t)(sizeof(float) * vertexData.size() + sizeof(uint32_t) * indexData.size());
+  g_UniformBuffer.model = glm::translate(
+    glm::rotate(
+      glm::scale(
+        glm::identity<glm::mat4x4>(),
+        { 1.0f, 1.0f, 1.0f }),
+      glm::radians(0.0f),
+      glm::normalize(glm::vec3{ 0.0f, 1.0f, 0.0f })),
+    { 0.0f, 0.0f, 0.0f });
+  g_UniformBuffer.view = glm::lookAt(glm::vec3{ 0.0f, 0.0f, 4.0f }, glm::vec3{ 0.0f, 0.0f, 0.0f }, glm::vec3{ 0.0f, 1.0f, 0.0f });
+  g_UniformBuffer.proj = glm::perspectiveFov(glm::radians(45.0f), (float)g_DrawableWidth, (float)g_DrawableHeight, 0.01f, 100.0f);
+  g_UniformBuffer.proj[1][1] *= -1;
+
+  uint32_t bufferSize = (uint32_t)(sizeof(g_VertexBuffer) + sizeof(g_IndexBuffer) + padding + sizeof(g_UniformBuffer));
   std::vector<char> bufferData(bufferSize);
-  memcpy(bufferData.data(), (void*)vertexData.data(), sizeof(float) * vertexData.size());
-  memcpy(bufferData.data() + sizeof(float) * vertexData.size(), (void*)indexData.data(), sizeof(uint32_t) * indexData.size());
+  memcpy(bufferData.data() + g_TriangleBufferVertexOffset, (void*)g_VertexBuffer, sizeof(g_VertexBuffer));
+  memcpy(bufferData.data() + g_TriangleBufferIndexOffset, (void*)g_IndexBuffer, sizeof(g_IndexBuffer));
+  memcpy(bufferData.data() + g_TriangleBufferUniformOffset, (void*)&g_UniformBuffer, sizeof(g_UniformBuffer));
 
   VkPhysicalDeviceMemoryProperties memoryProperties;
   vkGetPhysicalDeviceMemoryProperties(g_PhysicalDevice, &memoryProperties);
@@ -1098,7 +1293,8 @@ Result InitVkTriangleBuffer()
     VkBufferCreateInfo bufferCI = {};
     bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bufferCI.size = bufferSize;
-    bufferCI.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bufferCI.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT
+      | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     bufferCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     vkCreateBuffer(g_Device, &bufferCI, nullptr, &g_TriangleBuffer);
 
@@ -1203,6 +1399,11 @@ void DestroyVkTriangleBuffer()
   }
 }
 
+// Frame synchronization
+static std::vector<VkSemaphore> g_ImageAvailableSemaphores;
+static std::vector<VkSemaphore> g_RenderFinishedSemaphores;
+static std::vector<VkFence> g_GraphicsCommandBufferIsUsedFences;
+
 Result InitVkSemaphoresAndFences()
 {
   VkSemaphoreCreateInfo semaphoreCI = {};
@@ -1267,8 +1468,10 @@ void DestroyVkSemaphoresAndFences()
   g_RenderFinishedSemaphores.clear();
 }
 
-Result InitVulkan()
+Result Init()
 {
+  RETURN_IF_FAILURE(InitWindow(), "InitWindow");
+
   RETURN_IF_FAILURE(InitVkInstance(), "InitVkInstance");
 #ifndef NDEBUG
   RETURN_IF_FAILURE(InitVkDebugMessenger(), "InitVkDebugMessenger");
@@ -1277,20 +1480,20 @@ Result InitVulkan()
   RETURN_IF_FAILURE(InitVkPhysicalDevice(), "InitVkPhysicalDevice");
   RETURN_IF_FAILURE(InitVkDevice(), "InitVkDevice");
   RETURN_IF_FAILURE(InitVkSwapchain(), "InitVkSwapchain");
-  RETURN_IF_FAILURE(InitVkGraphicsPipeline(), "InitVkGraphicsPipeline");
+  RETURN_IF_FAILURE(InitVkShaders(), "InitVkShaders");
+  RETURN_IF_FAILURE(InitVkDescriptorPool(), "InitVkDescriptorPool");
+  RETURN_IF_FAILURE(InitVkDescriptorSetLayout(), "InitVkDescriptorSetLayout");
+  RETURN_IF_FAILURE(InitVkDescriptorSets(), "InitVkDescriptorSet");
+  RETURN_IF_FAILURE(InitVkPipelineCache(), "InitVkPipelineCache");
+  RETURN_IF_FAILURE(InitVkPipelineLayout(), "InitVkPipelineLayout");
+  RETURN_IF_FAILURE(InitVkRenderPass(), "InitVkRenderPass");
   RETURN_IF_FAILURE(InitVkSwapchainFramebuffers(), "InitVkSwapchainFramebuffers");
+  RETURN_IF_FAILURE(InitVkGraphicsPipeline(), "InitVkGraphicsPipeline");
   RETURN_IF_FAILURE(InitVkCommandPools(), "InitVkCommandPools");
   RETURN_IF_FAILURE(InitVkCommandBuffers(), "InitVkCommandBuffers");
   RETURN_IF_FAILURE(InitVkTriangleBuffer(), "InitVkTriangleBuffer");
   RETURN_IF_FAILURE(InitVkSemaphoresAndFences(), "InitVkSemaphoresAndFences");
 
-  return Result::Application(0);
-}
-
-Result Init()
-{
-  RETURN_IF_FAILURE(InitWindow(), "InitWindow");
-  RETURN_IF_FAILURE(InitVulkan(), "InitVulkan");
   SDL_ShowWindow(g_Window);
 
   return Result::Application(0);
@@ -1304,8 +1507,15 @@ void Shutdown()
   DestroyVkTriangleBuffer();
   DestroyVkCommandBuffers();
   DestroyVkCommandPools();
-  DestroyVkSwapchainFramebuffers();
   DestroyVkGraphicsPipeline();
+  DestroyVkSwapchainFramebuffers();
+  DestroyVkRenderPass();
+  DestroyVkPipelineLayout();
+  DestroyVkPipelineCache();
+  DestroyVkDescriptorSets();
+  DestroyVkDescriptorSetLayout();
+  DestroyVkDescriptorPool();
+  DestroyVkShaders();
   DestroyVkSwapchain();
   DestroyVkDevice();
   DestroyVkPhysicalDevice();
@@ -1333,6 +1543,7 @@ Result RecreateSwapchain()
 }
 
 float g_WorldTime = 0.0f;
+static uint32_t g_CurrentFrame = 0;
 
 Result WriteCommandBuffers(uint32_t swapchainImageIndex)
 {
@@ -1360,11 +1571,9 @@ Result WriteCommandBuffers(uint32_t swapchainImageIndex)
   renderPassBeginInfo.renderArea.extent = g_SwapchainExtent;
   vkCmdBeginRenderPass(commandBuffer, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
 
-  VkDeviceSize vertexBufferOffset = 0;
-  vkCmdBindVertexBuffers(commandBuffer, 0, 1, &g_TriangleBuffer, &vertexBufferOffset);
+  vkCmdBindVertexBuffers(commandBuffer, 0, 1, &g_TriangleBuffer, &g_TriangleBufferVertexOffset);
 
-  VkDeviceSize indexBufferOffset = 5 * 5 * sizeof(float);
-  vkCmdBindIndexBuffer(commandBuffer, g_TriangleBuffer, indexBufferOffset, VK_INDEX_TYPE_UINT32);
+  vkCmdBindIndexBuffer(commandBuffer, g_TriangleBuffer, g_TriangleBufferIndexOffset, VK_INDEX_TYPE_UINT32);
 
   VkViewport viewport = {};
   viewport.x = 0;
@@ -1377,8 +1586,9 @@ Result WriteCommandBuffers(uint32_t swapchainImageIndex)
 
   vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, g_GraphicsPipeline);
   vkCmdPushConstants(commandBuffer, g_PipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(float), &g_WorldTime);
+  vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, g_PipelineLayout, 0, 1, &g_DescriptorSets[g_CurrentFrame], 0, nullptr);
 
-  vkCmdDrawIndexed(commandBuffer, 9, 1, 0, 0, 0);
+  vkCmdDrawIndexed(commandBuffer, sizeof(g_IndexBuffer) / sizeof(g_IndexBuffer[0]), 1, 0, 0, 0);
 
   vkCmdEndRenderPass(commandBuffer);
 
@@ -1407,6 +1617,22 @@ Result Render(float normalizedDelay)
   RETURN_IF_FAILURE(Result::Vulkan(
     vkResetFences(g_Device, 1, &g_GraphicsCommandBufferIsUsedFences[g_CurrentFrame])),
     "vkResetFences");
+
+  VkDescriptorBufferInfo bufferInfo = {};
+  bufferInfo.buffer = g_TriangleBuffer;
+  bufferInfo.offset = g_TriangleBufferUniformOffset;
+  bufferInfo.range = sizeof(g_UniformBuffer);
+
+  VkWriteDescriptorSet writeSet = {};
+  writeSet.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+  writeSet.dstSet = g_DescriptorSets[g_CurrentFrame];
+  writeSet.dstBinding = 0;
+  writeSet.dstArrayElement = 0;
+  writeSet.descriptorCount = 1;
+  writeSet.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+  writeSet.pBufferInfo = &bufferInfo;
+  vkUpdateDescriptorSets(g_Device, 1, &writeSet, 0, nullptr);
+
   RETURN_IF_FAILURE(WriteCommandBuffers(imageIndex),
                     "VkWriteCommandBuffers");
 
@@ -1454,8 +1680,8 @@ Result Render(float normalizedDelay)
 void Loop()
 {
   // adaptive time per loop iteration?
-  const float MS_PER_LOOP_ITERATION = 1.0f / 60.0f * 1000.0f;
-  const float MS_PER_UPDATE = 1.0f / 60.0f * 1000.0f;
+  const float S_PER_LOOP_ITERATION = 1.0f / 60.0f;
+  const float S_PER_UPDATE = 1.0f / 60.0f;
   const int MAX_UPDATES_PER_FRAME = 4;
 
   bool windowVisible = true;
@@ -1515,33 +1741,33 @@ void Loop()
     // Process input here
 
     uint64_t current = SDL_GetPerformanceCounter();
-    float elapsed = (float)((current - previous) * 1000) / (float)SDL_GetPerformanceFrequency();
+    float elapsed = (float)(current - previous) / (float)SDL_GetPerformanceFrequency();
     previous = current;
     lag += elapsed;
 
     int numUpdates = 0;
-    while (lag >= MS_PER_UPDATE)
+    while (lag >= S_PER_UPDATE)
     {
       if (numUpdates >= MAX_UPDATES_PER_FRAME)
       {
         // omit missing updates
-        while (lag > MS_PER_UPDATE)
+        while (lag > S_PER_UPDATE)
         {
-          lag -= MS_PER_UPDATE;
+          lag -= S_PER_UPDATE;
         }
         break;
       }
 
       // Update world
-      g_WorldTime += MS_PER_UPDATE / 1000.0f;
+      g_WorldTime += S_PER_UPDATE;
 
-      lag -= MS_PER_UPDATE;
+      lag -= S_PER_UPDATE;
       numUpdates++;
     }
 
     if (windowVisible && g_WindowWidth > 0 && g_WindowHeight > 0)
     {
-      float renderDelay = lag / MS_PER_UPDATE; // normalized in range [0, 1)
+      float renderDelay = lag / S_PER_UPDATE; // normalized in range [0, 1)
       Result renderResult = Render(renderDelay);
       if (!renderResult.Success())
       {
@@ -1551,11 +1777,11 @@ void Loop()
     }
 
     uint64_t loopIterationEnd = SDL_GetPerformanceCounter();
-    float loopIterationTime = (float)((loopIterationEnd - loopIterationStart) * 1000)
+    float loopIterationTime = (float)(loopIterationEnd - loopIterationStart)
       / (float)SDL_GetPerformanceFrequency();
-    if (loopIterationTime < MS_PER_LOOP_ITERATION)
+    if (loopIterationTime < S_PER_LOOP_ITERATION)
     {
-      uint32_t sleepMs = (uint32_t)(MS_PER_LOOP_ITERATION - loopIterationTime);
+      uint32_t sleepMs = (uint32_t)((S_PER_LOOP_ITERATION - loopIterationTime) * 1000.0f);
       if (sleepMs > 0)
       {
         SDL_Delay(sleepMs);
