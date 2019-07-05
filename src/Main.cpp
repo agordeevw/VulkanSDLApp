@@ -8,6 +8,7 @@
 #include "glm/glm.hpp"
 #include "glm/geometric.hpp"
 #include "glm/gtc/matrix_transform.hpp"
+#include "glm/gtc/quaternion.hpp"
 
 #include "ShaderBytecode/Triangle.vert.h"
 #include "ShaderBytecode/Triangle.frag.h"
@@ -23,10 +24,15 @@ static Vertex g_VertexBuffer[] = {
   {{0.5f,   0.5f},  {0.0f, 0.0f, 1.0f}}, // right-top
   {{0.5f,   -0.5f}, {0.0f, 1.0f, 0.0f}}, // right-bottom
   {{-0.5f,  -0.5f}, {1.0f, 0.0f, 0.0f}}, // left-bottom
+  {{-0.5f,  0.5f},  {0.25f, 0.25f, 0.25f}}, // left-top-backface
+  {{0.5f,   0.5f},  {0.0f, 0.0f, 0.25f}}, // right-top-backface
+  {{0.5f,   -0.5f}, {0.0f, 0.25f, 0.0f}}, // right-bottom-backface
+  {{-0.5f,  -0.5f}, {0.25f, 0.0f, 0.0f}}, // left-bottom-backface
 };
 
 static uint32_t g_IndexBuffer[] = {
-  0, 1, 2, 0, 2, 3
+  0, 1, 2, 0, 2, 3,
+  4, 6, 5, 4, 7, 6
 };
 
 static struct UniformBuffer
@@ -141,6 +147,25 @@ void DestroyWindow()
   SDL_DestroyWindow(g_Window);
   g_Window = nullptr;
 }
+
+// Input
+
+struct Input
+{
+  void Update()
+  {
+    prevMouse = curMouse;
+    uint32_t buttons = SDL_GetMouseState(&curMouse.x, &curMouse.y);
+  }
+
+  struct MouseState
+  {
+    int x = 0, y = 0;
+  };
+
+  MouseState curMouse, prevMouse;
+} g_Input;
+
 
 // Instance
 static VkInstance g_Instance = VK_NULL_HANDLE;
@@ -1038,17 +1063,17 @@ Result InitVkGraphicsPipeline()
   vertexAttributeDescs[0] = {};
   vertexAttributeDescs[0].binding = 0;
   vertexAttributeDescs[0].location = 0;
-  vertexAttributeDescs[0].offset = 0;
+  vertexAttributeDescs[0].offset = offsetof(Vertex, pos);
   vertexAttributeDescs[0].format = VK_FORMAT_R32G32_SFLOAT;
   vertexAttributeDescs[1] = {};
   vertexAttributeDescs[1].binding = 0;
   vertexAttributeDescs[1].location = 1;
-  vertexAttributeDescs[1].offset = 2 * sizeof(float);
+  vertexAttributeDescs[1].offset = offsetof(Vertex, color);
   vertexAttributeDescs[1].format = VK_FORMAT_R32G32B32_SFLOAT;
 
   VkVertexInputBindingDescription vertexBindingDesc = {};
   vertexBindingDesc.binding = 0;
-  vertexBindingDesc.stride = 5 * sizeof(float);
+  vertexBindingDesc.stride = sizeof(Vertex);
   vertexBindingDesc.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
   VkPipelineVertexInputStateCreateInfo vertexInputStateCI = {};
@@ -1235,6 +1260,9 @@ void DestroyVkCommandBuffers()
 }
 
 // Buffers
+static VkDeviceMemory g_StagingBufferMemory;
+static VkBuffer g_StagingBuffer;
+static const VkDeviceSize g_StagingBufferSize = 1024 * 1024;
 static VkDeviceMemory g_TriangleBufferMemory;
 static VkBuffer g_TriangleBuffer;
 static uint64_t g_TriangleBufferVertexOffset;
@@ -1243,35 +1271,11 @@ static uint64_t g_TriangleBufferUniformOffset;
 
 Result InitVkTriangleBuffer()
 {
+  VkPhysicalDeviceMemoryProperties memoryProperties;
+  vkGetPhysicalDeviceMemoryProperties(g_PhysicalDevice, &memoryProperties);
   VkPhysicalDeviceProperties deviceProperties;
   vkGetPhysicalDeviceProperties(g_PhysicalDevice, &deviceProperties);
   VkDeviceSize minAlignment = deviceProperties.limits.minUniformBufferOffsetAlignment;
-
-  g_TriangleBufferVertexOffset = 0;
-  g_TriangleBufferIndexOffset = sizeof(g_VertexBuffer);
-  g_TriangleBufferUniformOffset = (uint32_t)((sizeof(g_VertexBuffer) + sizeof(g_IndexBuffer) + (minAlignment - 1)) / minAlignment * minAlignment);
-  uint64_t padding = g_TriangleBufferUniformOffset - (sizeof(g_VertexBuffer) + sizeof(g_IndexBuffer));
-
-  g_UniformBuffer.model = glm::translate(
-    glm::rotate(
-      glm::scale(
-        glm::identity<glm::mat4x4>(),
-        { 1.0f, 1.0f, 1.0f }),
-      glm::radians(0.0f),
-      glm::normalize(glm::vec3{ 0.0f, 1.0f, 0.0f })),
-    { 0.0f, 0.0f, 0.0f });
-  g_UniformBuffer.view = glm::lookAt(glm::vec3{ 0.0f, 0.0f, 4.0f }, glm::vec3{ 0.0f, 0.0f, 0.0f }, glm::vec3{ 0.0f, 1.0f, 0.0f });
-  g_UniformBuffer.proj = glm::perspectiveFov(glm::radians(45.0f), (float)g_DrawableWidth, (float)g_DrawableHeight, 0.01f, 100.0f);
-  g_UniformBuffer.proj[1][1] *= -1;
-
-  uint32_t bufferSize = (uint32_t)(sizeof(g_VertexBuffer) + sizeof(g_IndexBuffer) + padding + sizeof(g_UniformBuffer));
-  std::vector<char> bufferData(bufferSize);
-  memcpy(bufferData.data() + g_TriangleBufferVertexOffset, (void*)g_VertexBuffer, sizeof(g_VertexBuffer));
-  memcpy(bufferData.data() + g_TriangleBufferIndexOffset, (void*)g_IndexBuffer, sizeof(g_IndexBuffer));
-  memcpy(bufferData.data() + g_TriangleBufferUniformOffset, (void*)&g_UniformBuffer, sizeof(g_UniformBuffer));
-
-  VkPhysicalDeviceMemoryProperties memoryProperties;
-  vkGetPhysicalDeviceMemoryProperties(g_PhysicalDevice, &memoryProperties);
 
   auto FindMemoryType = [&memoryProperties](VkMemoryPropertyFlags propertyFlags, VkMemoryHeapFlags heapFlags) -> uint32_t
   {
@@ -1288,7 +1292,54 @@ Result InitVkTriangleBuffer()
     return (uint32_t)-1;
   };
 
-  // Create device-local buffer
+  // Create staging buffer
+  {
+    VkBufferCreateInfo bufferCI = {};
+    bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferCI.size = g_StagingBufferSize;
+    bufferCI.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    bufferCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    vkCreateBuffer(g_Device, &bufferCI, nullptr, &g_StagingBuffer);
+
+    VkMemoryRequirements memoryReqs;
+    vkGetBufferMemoryRequirements(g_Device, g_StagingBuffer, &memoryReqs);
+
+    // Find device-local memory type
+    uint32_t memoryType = FindMemoryType(
+      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+      0);
+
+    VkMemoryAllocateInfo allocateInfo = {};
+    allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocateInfo.memoryTypeIndex = memoryType;
+    allocateInfo.allocationSize = memoryReqs.size;
+    vkAllocateMemory(g_Device, &allocateInfo, nullptr, &g_StagingBufferMemory);
+
+    vkBindBufferMemory(g_Device, g_StagingBuffer, g_StagingBufferMemory, 0);
+  }
+
+  uint32_t bufferSize;
+  std::vector<char> bufferData;
+  // Prepare vertex buffer data
+  {
+    g_TriangleBufferVertexOffset = 0;
+    g_TriangleBufferIndexOffset = sizeof(g_VertexBuffer);
+    g_TriangleBufferUniformOffset = (uint32_t)((sizeof(g_VertexBuffer) + sizeof(g_IndexBuffer) + (minAlignment - 1)) / minAlignment * minAlignment);
+    uint64_t padding = g_TriangleBufferUniformOffset - (sizeof(g_VertexBuffer) + sizeof(g_IndexBuffer));
+    bufferSize = (uint32_t)(sizeof(g_VertexBuffer) + sizeof(g_IndexBuffer) + padding + sizeof(g_UniformBuffer));
+    bufferData.resize(bufferSize);
+
+    g_UniformBuffer.model = glm::identity<glm::mat4x4>();
+    g_UniformBuffer.view = glm::identity<glm::mat4x4>();
+    g_UniformBuffer.proj = glm::perspectiveFov(glm::radians(45.0f), (float)g_DrawableWidth, (float)g_DrawableHeight, 0.01f, 100.0f);
+    g_UniformBuffer.proj[1][1] *= -1;
+
+    memcpy(bufferData.data() + g_TriangleBufferVertexOffset, (void*)g_VertexBuffer, sizeof(g_VertexBuffer));
+    memcpy(bufferData.data() + g_TriangleBufferIndexOffset, (void*)g_IndexBuffer, sizeof(g_IndexBuffer));
+    memcpy(bufferData.data() + g_TriangleBufferUniformOffset, (void*)&g_UniformBuffer, sizeof(g_UniformBuffer));
+  }
+
+  // Create device-local buffer (vertex + index + uniform)
   {
     VkBufferCreateInfo bufferCI = {};
     bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -1315,41 +1366,12 @@ Result InitVkTriangleBuffer()
     vkBindBufferMemory(g_Device, g_TriangleBuffer, g_TriangleBufferMemory, 0);
   }
 
-  VkBuffer stagingBuffer;
-  VkDeviceMemory stagingBufferMemory;
-
-  // Create staging buffer
-  {
-    VkBufferCreateInfo bufferCI = {};
-    bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    bufferCI.size = bufferSize;
-    bufferCI.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-    bufferCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    vkCreateBuffer(g_Device, &bufferCI, nullptr, &stagingBuffer);
-
-    VkMemoryRequirements memoryReqs;
-    vkGetBufferMemoryRequirements(g_Device, stagingBuffer, &memoryReqs);
-
-    // Find device-local memory type
-    uint32_t memoryType = FindMemoryType(
-      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-      0);
-
-    VkMemoryAllocateInfo allocateInfo = {};
-    allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocateInfo.memoryTypeIndex = memoryType;
-    allocateInfo.allocationSize = memoryReqs.size;
-    vkAllocateMemory(g_Device, &allocateInfo, nullptr, &stagingBufferMemory);
-
-    vkBindBufferMemory(g_Device, stagingBuffer, stagingBufferMemory, 0);
-  }
-
   // Write to staging buffer
   {
     void* data;
-    vkMapMemory(g_Device, stagingBufferMemory, 0, bufferSize, 0, &data);
+    vkMapMemory(g_Device, g_StagingBufferMemory, 0, bufferSize, 0, &data);
     memcpy(data, bufferData.data(), bufferSize);
-    vkUnmapMemory(g_Device, stagingBufferMemory);
+    vkUnmapMemory(g_Device, g_StagingBufferMemory);
   }
 
   // Write from staging buffer to device-local buffer
@@ -1363,7 +1385,7 @@ Result InitVkTriangleBuffer()
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(g_TransferCommandBuffer, &beginInfo);
-    vkCmdCopyBuffer(g_TransferCommandBuffer, stagingBuffer, g_TriangleBuffer, 1, &copyRegion);
+    vkCmdCopyBuffer(g_TransferCommandBuffer, g_StagingBuffer, g_TriangleBuffer, 1, &copyRegion);
     vkEndCommandBuffer(g_TransferCommandBuffer);
 
     VkSubmitInfo submitInfo = {};
@@ -1374,18 +1396,12 @@ Result InitVkTriangleBuffer()
     vkQueueWaitIdle(g_TransferQueue);
   }
 
-  {
-    vkFreeCommandBuffers(g_Device, g_TransferCommandPool, 1, &g_TransferCommandBuffer);
-    g_TransferCommandBuffer = VK_NULL_HANDLE;
-    vkDestroyBuffer(g_Device, stagingBuffer, nullptr);
-    vkFreeMemory(g_Device, stagingBufferMemory, nullptr);
-  }
-
   return Result::Application(0);
 }
 
 void DestroyVkTriangleBuffer()
 {
+
   if (g_TriangleBuffer != VK_NULL_HANDLE)
   {
     vkDestroyBuffer(g_Device, g_TriangleBuffer, nullptr);
@@ -1397,11 +1413,24 @@ void DestroyVkTriangleBuffer()
     vkFreeMemory(g_Device, g_TriangleBufferMemory, nullptr);
     g_TriangleBufferMemory = VK_NULL_HANDLE;
   }
+
+  if (g_StagingBuffer != VK_NULL_HANDLE)
+  {
+    vkDestroyBuffer(g_Device, g_StagingBuffer, nullptr);
+    g_StagingBuffer = VK_NULL_HANDLE;
+  }
+
+  if (g_StagingBufferMemory != VK_NULL_HANDLE)
+  {
+    vkFreeMemory(g_Device, g_StagingBufferMemory, nullptr);
+    g_StagingBufferMemory = VK_NULL_HANDLE;
+  }
 }
 
 // Frame synchronization
 static std::vector<VkSemaphore> g_ImageAvailableSemaphores;
 static std::vector<VkSemaphore> g_RenderFinishedSemaphores;
+static VkFence g_UniformBufferWrittenFence;
 static std::vector<VkFence> g_GraphicsCommandBufferIsUsedFences;
 
 Result InitVkSemaphoresAndFences()
@@ -1435,11 +1464,22 @@ Result InitVkSemaphoresAndFences()
       "vkCreateFence");
   }
 
+  fenceCI.flags = 0;
+  RETURN_IF_FAILURE(Result::Vulkan(
+    vkCreateFence(g_Device, &fenceCI, nullptr, &g_UniformBufferWrittenFence)),
+    "");
+
   return Result::Application(0);
 }
 
 void DestroyVkSemaphoresAndFences()
 {
+  if (g_UniformBufferWrittenFence != VK_NULL_HANDLE)
+  {
+    vkDestroyFence(g_Device, g_UniformBufferWrittenFence, nullptr);
+    g_UniformBufferWrittenFence = VK_NULL_HANDLE;
+  }
+
   for (VkFence fence : g_GraphicsCommandBufferIsUsedFences)
   {
     if (fence != VK_NULL_HANDLE)
@@ -1545,6 +1585,40 @@ Result RecreateSwapchain()
 float g_WorldTime = 0.0f;
 static uint32_t g_CurrentFrame = 0;
 
+Result UpdateUniformBuffer()
+{
+  // Write to staging buffer
+  {
+    void* data;
+    vkMapMemory(g_Device, g_StagingBufferMemory, 0, sizeof(g_UniformBuffer), 0, &data);
+    memcpy(data, &g_UniformBuffer, sizeof(g_UniformBuffer));
+    vkUnmapMemory(g_Device, g_StagingBufferMemory);
+  }
+
+  // Write from staging buffer to device-local buffer
+  {
+    VkBufferCopy copyRegion = {};
+    copyRegion.srcOffset = VkDeviceSize{ 0 };
+    copyRegion.dstOffset = VkDeviceSize{ g_TriangleBufferUniformOffset };
+    copyRegion.size = sizeof(g_UniformBuffer);
+
+    VkCommandBufferBeginInfo beginInfo = {};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(g_TransferCommandBuffer, &beginInfo);
+    vkCmdCopyBuffer(g_TransferCommandBuffer, g_StagingBuffer, g_TriangleBuffer, 1, &copyRegion);
+    vkEndCommandBuffer(g_TransferCommandBuffer);
+
+    VkSubmitInfo submitInfo = {};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &g_TransferCommandBuffer;
+    vkQueueSubmit(g_TransferQueue, 1, &submitInfo, g_UniformBufferWrittenFence);
+  }
+
+  return Result::Application(0);
+}
+
 Result WriteCommandBuffers(uint32_t swapchainImageIndex)
 {
   VkCommandBuffer commandBuffer = g_GraphicsCommandBuffers[g_CurrentFrame];
@@ -1611,11 +1685,14 @@ Result Render(float normalizedDelay)
   }
   RETURN_IF_FAILURE(acquireNextImage, "vkAcquireNextImageKHR");
 
+  VkFence fencesToWait[2] = {
+    g_GraphicsCommandBufferIsUsedFences[g_CurrentFrame], g_UniformBufferWrittenFence };
+
   RETURN_IF_FAILURE(Result::Vulkan(
-    vkWaitForFences(g_Device, 1, &g_GraphicsCommandBufferIsUsedFences[g_CurrentFrame], VK_TRUE, (uint64_t)-1)),
+    vkWaitForFences(g_Device, 2, fencesToWait, VK_TRUE, (uint64_t)-1)),
     "vkWaitForFences");
   RETURN_IF_FAILURE(Result::Vulkan(
-    vkResetFences(g_Device, 1, &g_GraphicsCommandBufferIsUsedFences[g_CurrentFrame])),
+    vkResetFences(g_Device, 2, fencesToWait)),
     "vkResetFences");
 
   VkDescriptorBufferInfo bufferInfo = {};
@@ -1677,6 +1754,15 @@ Result Render(float normalizedDelay)
   return Result::Application(0);
 }
 
+static glm::vec3 translation = { 0.0f, 0.0f, 0.0f };
+static glm::vec3 rotationAxis = { 0.0f, 0.0f, 1.0f };
+static float rotationAngle = glm::radians(0.0f);
+static glm::vec3 scaling = { 1.0f, 1.0f, 1.0f };
+
+static glm::vec3 cameraTranslation = { 0.0f, 2.0f, 2.0f };
+static glm::vec3 cameraTarget = { 0.0f, 0.0f, 0.0f };
+static glm::vec3 cameraUp = { 0.0f, 1.0f, 0.0f };
+
 void Loop()
 {
   // adaptive time per loop iteration?
@@ -1691,6 +1777,8 @@ void Loop()
   while (1)
   {
     uint64_t loopIterationStart = SDL_GetPerformanceCounter();
+
+    SDL_PumpEvents();
 
     SDL_Event event;
     while (SDL_PollEvent(&event))
@@ -1739,6 +1827,7 @@ void Loop()
     }
 
     // Process input here
+    g_Input.Update();
 
     uint64_t current = SDL_GetPerformanceCounter();
     float elapsed = (float)(current - previous) / (float)SDL_GetPerformanceFrequency();
@@ -1759,7 +1848,24 @@ void Loop()
       }
 
       // Update world
-      g_WorldTime += S_PER_UPDATE;
+      {
+        g_WorldTime += S_PER_UPDATE;
+
+        glm::quat rot = glm::angleAxis(glm::radians(90.0f), glm::vec3{-1.0f, 0.0f, 0.0f});
+        rot = glm::rotate(rot, g_WorldTime * glm::radians(90.0f), glm::vec3{0.0f, 0.0f, 1.0f});
+        rotationAxis = glm::axis(rot);
+        rotationAngle = glm::angle(rot);
+
+        rotationAngle += S_PER_UPDATE * glm::radians(90.0f);
+
+        g_UniformBuffer.model = glm::identity<glm::mat4x4>();
+        g_UniformBuffer.model = glm::scale(g_UniformBuffer.model, scaling);
+        g_UniformBuffer.model = glm::rotate(g_UniformBuffer.model, rotationAngle, rotationAxis);
+        g_UniformBuffer.model = glm::translate(g_UniformBuffer.model, translation);
+        g_UniformBuffer.view = glm::lookAt(cameraTranslation, cameraTarget, cameraUp);
+        g_UniformBuffer.proj = glm::perspectiveFov(glm::radians(45.0f), (float)g_DrawableWidth, (float)g_DrawableHeight, 0.01f, 100.0f);
+        g_UniformBuffer.proj[1][1] *= -1.0f;
+      }
 
       lag -= S_PER_UPDATE;
       numUpdates++;
@@ -1767,6 +1873,8 @@ void Loop()
 
     if (windowVisible && g_WindowWidth > 0 && g_WindowHeight > 0)
     {
+      UpdateUniformBuffer();
+
       float renderDelay = lag / S_PER_UPDATE; // normalized in range [0, 1)
       Result renderResult = Render(renderDelay);
       if (!renderResult.Success())
