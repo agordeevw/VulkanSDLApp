@@ -9,6 +9,7 @@
 #include "glm/geometric.hpp"
 #include "glm/gtc/matrix_transform.hpp"
 #include "glm/gtc/quaternion.hpp"
+#include "stb_image.h"
 
 #include "ShaderBytecode/Triangle.vert.h"
 #include "ShaderBytecode/Triangle.frag.h"
@@ -112,8 +113,8 @@ void HandleResult(Result res, const char* message)
 }
 
 static SDL_Window* g_Window;
-static uint32_t g_WindowWidth = 600;
-static uint32_t g_WindowHeight = 600;
+static uint32_t g_WindowWidth = 1920;
+static uint32_t g_WindowHeight = 1080;
 static uint32_t g_DrawableWidth;
 static uint32_t g_DrawableHeight;
 static bool g_DrawableChanged = false;
@@ -128,7 +129,10 @@ Result InitWindow()
     "",
     SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
     (int)g_WindowWidth, (int)g_WindowHeight,
-    SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_VULKAN);
+    SDL_WINDOW_HIDDEN
+    | SDL_WINDOW_RESIZABLE
+    | SDL_WINDOW_VULKAN
+    | SDL_WINDOW_FULLSCREEN_DESKTOP);
 
   RETURN_IF_FAILURE(Result::Application(
     g_Window == nullptr ? 2 : 0),
@@ -483,12 +487,17 @@ void DestroyVkPhysicalDevice()
 static VkDevice g_Device = VK_NULL_HANDLE;
 static VkQueue g_GraphicsQueue = VK_NULL_HANDLE;
 static VkQueue g_TransferQueue = VK_NULL_HANDLE;
+static VkQueue g_ComputeQueue = VK_NULL_HANDLE;
 static VkQueue g_PresentQueue = VK_NULL_HANDLE;
 
 Result InitVkDevice()
 {
   std::vector<uint32_t> queueFamilies = {
-    g_GraphicsQueueFamily, g_PresentQueueFamily, g_TransferQueueFamily };
+    g_GraphicsQueueFamily,
+    g_PresentQueueFamily,
+    g_TransferQueueFamily,
+    g_ComputeQueueFamily
+  };
 
   std::vector<uint32_t> usedQueueFamilies;
   std::vector<VkDeviceQueueCreateInfo> queueCIs;
@@ -532,15 +541,9 @@ Result InitVkDevice()
   ci.pQueueCreateInfos = queueCIs.data();
   ci.pEnabledFeatures = &features;
   ci.enabledLayerCount = (uint32_t)layers.size();
-  if (layers.size() > 0)
-  {
-    ci.ppEnabledLayerNames = layers.data();
-  }
+  ci.ppEnabledLayerNames = layers.size() > 0 ? layers.data() : nullptr;
   ci.enabledExtensionCount = (uint32_t)extensions.size();
-  if (extensions.size() > 0)
-  {
-    ci.ppEnabledExtensionNames = extensions.data();
-  }
+  ci.ppEnabledExtensionNames = extensions.size() > 0 ? extensions.data() : nullptr;
 
   RETURN_IF_FAILURE(Result::Vulkan(
     vkCreateDevice(g_PhysicalDevice, &ci, nullptr, &g_Device)),
@@ -548,6 +551,7 @@ Result InitVkDevice()
 
   vkGetDeviceQueue(g_Device, g_GraphicsQueueFamily, 0, &g_GraphicsQueue);
   vkGetDeviceQueue(g_Device, g_TransferQueueFamily, 0, &g_TransferQueue);
+  vkGetDeviceQueue(g_Device, g_ComputeQueueFamily, 0, &g_ComputeQueue);
   vkGetDeviceQueue(g_Device, g_PresentQueueFamily, 0, &g_PresentQueue);
 
   return Result::Application(0);
@@ -557,6 +561,8 @@ void DestroyVkDevice()
 {
   g_GraphicsQueue = VK_NULL_HANDLE;
   g_PresentQueue = VK_NULL_HANDLE;
+  g_TransferQueue = VK_NULL_HANDLE;
+  g_ComputeQueue = VK_NULL_HANDLE;
 
   if (g_Device != VK_NULL_HANDLE)
   {
@@ -828,7 +834,7 @@ void DestroyVkDescriptorPool()
 }
 
 // Descriptor set layout
-static VkDescriptorSetLayout g_DescriptorSetLayouts[MAX_FRAMES_IN_FLIGHT];
+static VkDescriptorSetLayout g_DescriptorSetLayout;
 
 Result InitVkDescriptorSetLayout()
 {
@@ -842,23 +848,17 @@ Result InitVkDescriptorSetLayout()
   ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
   ci.bindingCount = 1;
   ci.pBindings = &binding;
-  for (VkDescriptorSetLayout& layout : g_DescriptorSetLayouts)
-  {
-    VkResult res = vkCreateDescriptorSetLayout(g_Device, &ci, nullptr, &layout);
-    RETURN_IF_FAILURE(Result::Vulkan(res), "vkCreateDescriptorSetLayout");
-  }
+  VkResult res = vkCreateDescriptorSetLayout(g_Device, &ci, nullptr, &g_DescriptorSetLayout);
+  RETURN_IF_FAILURE(Result::Vulkan(res), "vkCreateDescriptorSetLayout");
   return Result::Application(0);
 }
 
 void DestroyVkDescriptorSetLayout()
 {
-  for (VkDescriptorSetLayout& layout : g_DescriptorSetLayouts)
+  if (g_DescriptorSetLayout != VK_NULL_HANDLE)
   {
-    if (layout != VK_NULL_HANDLE)
-    {
-      vkDestroyDescriptorSetLayout(g_Device, layout, nullptr);
-      layout = VK_NULL_HANDLE;
-    }
+    vkDestroyDescriptorSetLayout(g_Device, g_DescriptorSetLayout, nullptr);
+    g_DescriptorSetLayout = VK_NULL_HANDLE;
   }
 }
 
@@ -870,11 +870,14 @@ Result InitVkDescriptorSets()
   VkDescriptorSetAllocateInfo info = {};
   info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
   info.descriptorPool = g_DescriptorPool;
-  info.descriptorSetCount = MAX_FRAMES_IN_FLIGHT;
-  info.pSetLayouts = g_DescriptorSetLayouts;
+  info.descriptorSetCount = 1;
+  info.pSetLayouts = &g_DescriptorSetLayout;
 
-  VkResult res = vkAllocateDescriptorSets(g_Device, &info, g_DescriptorSets);
-  RETURN_IF_FAILURE(Result::Vulkan(res), "vkAllocateDescriptorSets");
+  for (VkDescriptorSet& set : g_DescriptorSets)
+  {
+    VkResult res = vkAllocateDescriptorSets(g_Device, &info, &set);
+    RETURN_IF_FAILURE(Result::Vulkan(res), "vkAllocateDescriptorSets");
+  }
   return Result::Application(0);
 }
 
@@ -929,8 +932,8 @@ Result InitVkPipelineLayout()
     pipelineLayoutCI.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pipelineLayoutCI.pushConstantRangeCount = 1;
     pipelineLayoutCI.pPushConstantRanges = &pushConstantRange;
-    pipelineLayoutCI.setLayoutCount = MAX_FRAMES_IN_FLIGHT;
-    pipelineLayoutCI.pSetLayouts = g_DescriptorSetLayouts;
+    pipelineLayoutCI.setLayoutCount = 1;
+    pipelineLayoutCI.pSetLayouts = &g_DescriptorSetLayout;
 
     RETURN_IF_FAILURE(Result::Vulkan(
       vkCreatePipelineLayout(g_Device, &pipelineLayoutCI, nullptr, &g_PipelineLayout)),
@@ -1260,9 +1263,77 @@ void DestroyVkCommandBuffers()
 }
 
 // Buffers
+uint32_t FindMemoryType(VkMemoryPropertyFlags propertyFlags,
+                        VkMemoryHeapFlags heapFlags)
+{
+  VkPhysicalDeviceMemoryProperties memoryProperties;
+  vkGetPhysicalDeviceMemoryProperties(g_PhysicalDevice, &memoryProperties);
+
+  for (uint32_t i = 0; i < memoryProperties.memoryTypeCount; i++)
+  {
+    uint32_t heap = memoryProperties.memoryTypes[i].heapIndex;
+    if (((memoryProperties.memoryHeaps[heap].flags & heapFlags) == heapFlags)
+        && ((memoryProperties.memoryTypes[i].propertyFlags & propertyFlags) == propertyFlags))
+    {
+      return i;
+      break;
+    }
+  }
+  return (uint32_t)-1;
+}
+
 static VkDeviceMemory g_StagingBufferMemory;
 static VkBuffer g_StagingBuffer;
-static const VkDeviceSize g_StagingBufferSize = 1024 * 1024;
+static const VkDeviceSize g_StagingBufferSize = 512 * 1024 * 1024;
+
+Result InitVkStagingBuffer()
+{
+  VkBufferCreateInfo bufferCI = {};
+  bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  bufferCI.size = g_StagingBufferSize;
+  bufferCI.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+  bufferCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  RETURN_IF_FAILURE(Result::Vulkan(
+    vkCreateBuffer(g_Device, &bufferCI, nullptr, &g_StagingBuffer)),
+    "vkCreateBuffer");
+
+  VkMemoryRequirements memoryReqs;
+  vkGetBufferMemoryRequirements(g_Device, g_StagingBuffer, &memoryReqs);
+
+  // Find device-local memory type
+  uint32_t memoryType = FindMemoryType(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                       0);
+
+  VkMemoryAllocateInfo allocateInfo = {};
+  allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+  allocateInfo.memoryTypeIndex = memoryType;
+  allocateInfo.allocationSize = memoryReqs.size;
+  RETURN_IF_FAILURE(Result::Vulkan(
+    vkAllocateMemory(g_Device, &allocateInfo, nullptr, &g_StagingBufferMemory)),
+    "vkAllocateMemory");
+
+  RETURN_IF_FAILURE(Result::Vulkan(
+    vkBindBufferMemory(g_Device, g_StagingBuffer, g_StagingBufferMemory, 0)),
+    "vkBindBufferMemory");
+
+  return Result::Application(0);
+}
+
+void DestroyVkStagingBuffer()
+{
+  if (g_StagingBuffer != VK_NULL_HANDLE)
+  {
+    vkDestroyBuffer(g_Device, g_StagingBuffer, nullptr);
+    g_StagingBuffer = VK_NULL_HANDLE;
+  }
+
+  if (g_StagingBufferMemory != VK_NULL_HANDLE)
+  {
+    vkFreeMemory(g_Device, g_StagingBufferMemory, nullptr);
+    g_StagingBufferMemory = VK_NULL_HANDLE;
+  }
+}
+
 static VkDeviceMemory g_TriangleBufferMemory;
 static VkBuffer g_TriangleBuffer;
 static uint64_t g_TriangleBufferVertexOffset;
@@ -1271,57 +1342,14 @@ static uint64_t g_TriangleBufferUniformOffset;
 
 Result InitVkTriangleBuffer()
 {
-  VkPhysicalDeviceMemoryProperties memoryProperties;
-  vkGetPhysicalDeviceMemoryProperties(g_PhysicalDevice, &memoryProperties);
-  VkPhysicalDeviceProperties deviceProperties;
-  vkGetPhysicalDeviceProperties(g_PhysicalDevice, &deviceProperties);
-  VkDeviceSize minAlignment = deviceProperties.limits.minUniformBufferOffsetAlignment;
-
-  auto FindMemoryType = [&memoryProperties](VkMemoryPropertyFlags propertyFlags, VkMemoryHeapFlags heapFlags) -> uint32_t
-  {
-    for (uint32_t i = 0; i < memoryProperties.memoryTypeCount; i++)
-    {
-      uint32_t heap = memoryProperties.memoryTypes[i].heapIndex;
-      if (((memoryProperties.memoryHeaps[heap].flags & heapFlags) == heapFlags)
-          && ((memoryProperties.memoryTypes[i].propertyFlags & propertyFlags) == propertyFlags))
-      {
-        return i;
-        break;
-      }
-    }
-    return (uint32_t)-1;
-  };
-
-  // Create staging buffer
-  {
-    VkBufferCreateInfo bufferCI = {};
-    bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    bufferCI.size = g_StagingBufferSize;
-    bufferCI.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-    bufferCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    vkCreateBuffer(g_Device, &bufferCI, nullptr, &g_StagingBuffer);
-
-    VkMemoryRequirements memoryReqs;
-    vkGetBufferMemoryRequirements(g_Device, g_StagingBuffer, &memoryReqs);
-
-    // Find device-local memory type
-    uint32_t memoryType = FindMemoryType(
-      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-      0);
-
-    VkMemoryAllocateInfo allocateInfo = {};
-    allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocateInfo.memoryTypeIndex = memoryType;
-    allocateInfo.allocationSize = memoryReqs.size;
-    vkAllocateMemory(g_Device, &allocateInfo, nullptr, &g_StagingBufferMemory);
-
-    vkBindBufferMemory(g_Device, g_StagingBuffer, g_StagingBufferMemory, 0);
-  }
-
   uint32_t bufferSize;
   std::vector<char> bufferData;
   // Prepare vertex buffer data
   {
+    VkPhysicalDeviceProperties deviceProperties;
+    vkGetPhysicalDeviceProperties(g_PhysicalDevice, &deviceProperties);
+    VkDeviceSize minAlignment = deviceProperties.limits.minUniformBufferOffsetAlignment;
+
     g_TriangleBufferVertexOffset = 0;
     g_TriangleBufferIndexOffset = sizeof(g_VertexBuffer);
     g_TriangleBufferUniformOffset = (uint32_t)((sizeof(g_VertexBuffer) + sizeof(g_IndexBuffer) + (minAlignment - 1)) / minAlignment * minAlignment);
@@ -1353,9 +1381,8 @@ Result InitVkTriangleBuffer()
     vkGetBufferMemoryRequirements(g_Device, g_TriangleBuffer, &memoryReqs);
 
     // Find device-local memory type
-    uint32_t memoryType = FindMemoryType(
-      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-      VK_MEMORY_HEAP_DEVICE_LOCAL_BIT);
+    uint32_t memoryType = FindMemoryType(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                                         VK_MEMORY_HEAP_DEVICE_LOCAL_BIT);
 
     VkMemoryAllocateInfo allocateInfo = {};
     allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
@@ -1412,18 +1439,6 @@ void DestroyVkTriangleBuffer()
   {
     vkFreeMemory(g_Device, g_TriangleBufferMemory, nullptr);
     g_TriangleBufferMemory = VK_NULL_HANDLE;
-  }
-
-  if (g_StagingBuffer != VK_NULL_HANDLE)
-  {
-    vkDestroyBuffer(g_Device, g_StagingBuffer, nullptr);
-    g_StagingBuffer = VK_NULL_HANDLE;
-  }
-
-  if (g_StagingBufferMemory != VK_NULL_HANDLE)
-  {
-    vkFreeMemory(g_Device, g_StagingBufferMemory, nullptr);
-    g_StagingBufferMemory = VK_NULL_HANDLE;
   }
 }
 
@@ -1508,6 +1523,7 @@ void DestroyVkSemaphoresAndFences()
   g_RenderFinishedSemaphores.clear();
 }
 
+// Application
 Result Init()
 {
   RETURN_IF_FAILURE(InitWindow(), "InitWindow");
@@ -1531,6 +1547,7 @@ Result Init()
   RETURN_IF_FAILURE(InitVkGraphicsPipeline(), "InitVkGraphicsPipeline");
   RETURN_IF_FAILURE(InitVkCommandPools(), "InitVkCommandPools");
   RETURN_IF_FAILURE(InitVkCommandBuffers(), "InitVkCommandBuffers");
+  RETURN_IF_FAILURE(InitVkStagingBuffer(), "InitVkStagingBuffer");
   RETURN_IF_FAILURE(InitVkTriangleBuffer(), "InitVkTriangleBuffer");
   RETURN_IF_FAILURE(InitVkSemaphoresAndFences(), "InitVkSemaphoresAndFences");
 
@@ -1545,6 +1562,7 @@ void Shutdown()
 
   DestroyVkSemaphoresAndFences();
   DestroyVkTriangleBuffer();
+  DestroyVkStagingBuffer();
   DestroyVkCommandBuffers();
   DestroyVkCommandPools();
   DestroyVkGraphicsPipeline();
@@ -1686,7 +1704,8 @@ Result Render(float normalizedDelay)
   RETURN_IF_FAILURE(acquireNextImage, "vkAcquireNextImageKHR");
 
   VkFence fencesToWait[2] = {
-    g_GraphicsCommandBufferIsUsedFences[g_CurrentFrame], g_UniformBufferWrittenFence };
+    g_GraphicsCommandBufferIsUsedFences[g_CurrentFrame],
+    g_UniformBufferWrittenFence };
 
   RETURN_IF_FAILURE(Result::Vulkan(
     vkWaitForFences(g_Device, 2, fencesToWait, VK_TRUE, (uint64_t)-1)),
@@ -1766,9 +1785,9 @@ static glm::vec3 cameraUp = { 0.0f, 1.0f, 0.0f };
 void Loop()
 {
   // adaptive time per loop iteration?
-  const float S_PER_LOOP_ITERATION = 1.0f / 60.0f;
+  const float S_PER_FRAME = 1.0f / 60.0f;
   const float S_PER_UPDATE = 1.0f / 60.0f;
-  const int MAX_UPDATES_PER_FRAME = 4;
+  const int MAX_UPDATES_PER_FRAME = 8;
 
   bool windowVisible = true;
 
@@ -1777,8 +1796,6 @@ void Loop()
   while (1)
   {
     uint64_t loopIterationStart = SDL_GetPerformanceCounter();
-
-    SDL_PumpEvents();
 
     SDL_Event event;
     while (SDL_PollEvent(&event))
@@ -1826,8 +1843,9 @@ void Loop()
       }
     }
 
-    // Process input here
-    g_Input.Update();
+    {
+      g_Input.Update();
+    }
 
     uint64_t current = SDL_GetPerformanceCounter();
     float elapsed = (float)(current - previous) / (float)SDL_GetPerformanceFrequency();
@@ -1851,12 +1869,10 @@ void Loop()
       {
         g_WorldTime += S_PER_UPDATE;
 
-        glm::quat rot = glm::angleAxis(glm::radians(90.0f), glm::vec3{-1.0f, 0.0f, 0.0f});
-        rot = glm::rotate(rot, g_WorldTime * glm::radians(90.0f), glm::vec3{0.0f, 0.0f, 1.0f});
+        glm::quat rot = glm::angleAxis(glm::radians(90.0f), glm::vec3{ -1.0f, 0.0f, 0.0f });
+        rot = glm::rotate(rot, g_WorldTime * glm::radians(90.0f), glm::vec3{ 0.0f, 0.0f, 1.0f });
         rotationAxis = glm::axis(rot);
         rotationAngle = glm::angle(rot);
-
-        rotationAngle += S_PER_UPDATE * glm::radians(90.0f);
 
         g_UniformBuffer.model = glm::identity<glm::mat4x4>();
         g_UniformBuffer.model = glm::scale(g_UniformBuffer.model, scaling);
@@ -1887,9 +1903,9 @@ void Loop()
     uint64_t loopIterationEnd = SDL_GetPerformanceCounter();
     float loopIterationTime = (float)(loopIterationEnd - loopIterationStart)
       / (float)SDL_GetPerformanceFrequency();
-    if (loopIterationTime < S_PER_LOOP_ITERATION)
+    if (loopIterationTime < S_PER_FRAME)
     {
-      uint32_t sleepMs = (uint32_t)((S_PER_LOOP_ITERATION - loopIterationTime) * 1000.0f);
+      uint32_t sleepMs = (uint32_t)((S_PER_FRAME - loopIterationTime) * 1000.0f);
       if (sleepMs > 0)
       {
         SDL_Delay(sleepMs);

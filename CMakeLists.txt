@@ -14,9 +14,11 @@ find_package(Vulkan REQUIRED)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 add_executable(VulkanSDLApp
+	"src/stb_image.h"
+	"src/stb_image.c"
 	"src/Main.cpp")
 target_include_directories(VulkanSDLApp PUBLIC
-  "src"
+	"src"
 	${SDL2_INCLUDE_DIRS}
 	${ASSIMP_INCLUDE_DIRS}
 	${GLM_INCLUDE_DIRS}
