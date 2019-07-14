@@ -10,6 +10,7 @@
 #include "glm/gtc/matrix_transform.hpp"
 #include "glm/gtc/quaternion.hpp"
 #include "stb_image.h"
+#include "vk_mem_alloc.h"
 
 #include "ShaderBytecode/Triangle.vert.h"
 #include "ShaderBytecode/Triangle.frag.h"
@@ -113,8 +114,8 @@ void HandleResult(Result res, const char* message)
 }
 
 static SDL_Window* g_Window;
-static uint32_t g_WindowWidth = 1920;
-static uint32_t g_WindowHeight = 1080;
+static uint32_t g_WindowWidth = 640;
+static uint32_t g_WindowHeight = 480;
 static uint32_t g_DrawableWidth;
 static uint32_t g_DrawableHeight;
 static bool g_DrawableChanged = false;
@@ -131,8 +132,7 @@ Result InitWindow()
     (int)g_WindowWidth, (int)g_WindowHeight,
     SDL_WINDOW_HIDDEN
     | SDL_WINDOW_RESIZABLE
-    | SDL_WINDOW_VULKAN
-    | SDL_WINDOW_FULLSCREEN_DESKTOP);
+    | SDL_WINDOW_VULKAN);
 
   RETURN_IF_FAILURE(Result::Application(
     g_Window == nullptr ? 2 : 0),
@@ -569,6 +569,37 @@ void DestroyVkDevice()
     vkDestroyDevice(g_Device, nullptr);
     g_Device = VK_NULL_HANDLE;
   }
+}
+
+// Allocator
+static VmaAllocator g_Allocator;
+
+Result InitVmaAllocator()
+{
+  VmaAllocatorCreateInfo ci = {};
+  ci.physicalDevice = g_PhysicalDevice;
+  ci.device = g_Device;
+  ci.preferredLargeHeapBlockSize = 0;
+  ci.pAllocationCallbacks = nullptr;
+  ci.pDeviceMemoryCallbacks = nullptr;
+  ci.frameInUseCount = 1;
+  ci.pHeapSizeLimit = nullptr;
+  ci.pVulkanFunctions = nullptr;
+  ci.pRecordSettings = nullptr;
+
+  Result res = Result::Vulkan(
+    vmaCreateAllocator(&ci, &g_Allocator));
+  RETURN_IF_FAILURE(res, "vmaCreateAllocator");
+
+  return Result::Application(0);
+}
+
+void DestroyVmaAllocator()
+{
+  if (g_Allocator == VK_NULL_HANDLE) return;
+
+  vmaDestroyAllocator(g_Allocator);
+  g_Allocator = VK_NULL_HANDLE;
 }
 
 // Swapchain + image views
@@ -1282,8 +1313,8 @@ uint32_t FindMemoryType(VkMemoryPropertyFlags propertyFlags,
   return (uint32_t)-1;
 }
 
-static VkDeviceMemory g_StagingBufferMemory;
 static VkBuffer g_StagingBuffer;
+static VmaAllocation g_StagingBufferAllocation;
 static const VkDeviceSize g_StagingBufferSize = 512 * 1024 * 1024;
 
 Result InitVkStagingBuffer()
@@ -1293,49 +1324,26 @@ Result InitVkStagingBuffer()
   bufferCI.size = g_StagingBufferSize;
   bufferCI.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
   bufferCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-  RETURN_IF_FAILURE(Result::Vulkan(
-    vkCreateBuffer(g_Device, &bufferCI, nullptr, &g_StagingBuffer)),
-    "vkCreateBuffer");
 
-  VkMemoryRequirements memoryReqs;
-  vkGetBufferMemoryRequirements(g_Device, g_StagingBuffer, &memoryReqs);
-
-  // Find device-local memory type
-  uint32_t memoryType = FindMemoryType(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                                       0);
-
-  VkMemoryAllocateInfo allocateInfo = {};
-  allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-  allocateInfo.memoryTypeIndex = memoryType;
-  allocateInfo.allocationSize = memoryReqs.size;
-  RETURN_IF_FAILURE(Result::Vulkan(
-    vkAllocateMemory(g_Device, &allocateInfo, nullptr, &g_StagingBufferMemory)),
-    "vkAllocateMemory");
+  VmaAllocationCreateInfo allocCI = {};
+  allocCI.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
 
   RETURN_IF_FAILURE(Result::Vulkan(
-    vkBindBufferMemory(g_Device, g_StagingBuffer, g_StagingBufferMemory, 0)),
-    "vkBindBufferMemory");
+    vmaCreateBuffer(g_Allocator, &bufferCI, &allocCI, &g_StagingBuffer, &g_StagingBufferAllocation, nullptr)),
+    "vmaCreateBuffer");
 
   return Result::Application(0);
 }
 
 void DestroyVkStagingBuffer()
 {
-  if (g_StagingBuffer != VK_NULL_HANDLE)
-  {
-    vkDestroyBuffer(g_Device, g_StagingBuffer, nullptr);
-    g_StagingBuffer = VK_NULL_HANDLE;
-  }
-
-  if (g_StagingBufferMemory != VK_NULL_HANDLE)
-  {
-    vkFreeMemory(g_Device, g_StagingBufferMemory, nullptr);
-    g_StagingBufferMemory = VK_NULL_HANDLE;
-  }
+  vmaDestroyBuffer(g_Allocator, g_StagingBuffer, g_StagingBufferAllocation);
+  g_StagingBuffer = VK_NULL_HANDLE;
+  g_StagingBufferAllocation = VK_NULL_HANDLE;
 }
 
-static VkDeviceMemory g_TriangleBufferMemory;
 static VkBuffer g_TriangleBuffer;
+static VmaAllocation g_TriangleBufferAllocation;
 static uint64_t g_TriangleBufferVertexOffset;
 static uint64_t g_TriangleBufferIndexOffset;
 static uint64_t g_TriangleBufferUniformOffset;
@@ -1375,30 +1383,19 @@ Result InitVkTriangleBuffer()
     bufferCI.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT
       | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     bufferCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    vkCreateBuffer(g_Device, &bufferCI, nullptr, &g_TriangleBuffer);
 
-    VkMemoryRequirements memoryReqs;
-    vkGetBufferMemoryRequirements(g_Device, g_TriangleBuffer, &memoryReqs);
-
-    // Find device-local memory type
-    uint32_t memoryType = FindMemoryType(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                                         VK_MEMORY_HEAP_DEVICE_LOCAL_BIT);
-
-    VkMemoryAllocateInfo allocateInfo = {};
-    allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocateInfo.memoryTypeIndex = memoryType;
-    allocateInfo.allocationSize = memoryReqs.size;
-    vkAllocateMemory(g_Device, &allocateInfo, nullptr, &g_TriangleBufferMemory);
-
-    vkBindBufferMemory(g_Device, g_TriangleBuffer, g_TriangleBufferMemory, 0);
+    VmaAllocationCreateInfo allocCI = {};
+    allocCI.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+   
+    vmaCreateBuffer(g_Allocator, &bufferCI, &allocCI, &g_TriangleBuffer, &g_TriangleBufferAllocation, nullptr);
   }
 
   // Write to staging buffer
   {
     void* data;
-    vkMapMemory(g_Device, g_StagingBufferMemory, 0, bufferSize, 0, &data);
+    vmaMapMemory(g_Allocator, g_StagingBufferAllocation, &data);
     memcpy(data, bufferData.data(), bufferSize);
-    vkUnmapMemory(g_Device, g_StagingBufferMemory);
+    vmaUnmapMemory(g_Allocator, g_StagingBufferAllocation);
   }
 
   // Write from staging buffer to device-local buffer
@@ -1428,18 +1425,9 @@ Result InitVkTriangleBuffer()
 
 void DestroyVkTriangleBuffer()
 {
-
-  if (g_TriangleBuffer != VK_NULL_HANDLE)
-  {
-    vkDestroyBuffer(g_Device, g_TriangleBuffer, nullptr);
-    g_TriangleBuffer = VK_NULL_HANDLE;
-  }
-
-  if (g_TriangleBufferMemory != VK_NULL_HANDLE)
-  {
-    vkFreeMemory(g_Device, g_TriangleBufferMemory, nullptr);
-    g_TriangleBufferMemory = VK_NULL_HANDLE;
-  }
+  vmaDestroyBuffer(g_Allocator, g_TriangleBuffer, g_TriangleBufferAllocation);
+  g_TriangleBuffer = VK_NULL_HANDLE;
+  g_TriangleBufferAllocation = VK_NULL_HANDLE;
 }
 
 // Frame synchronization
@@ -1535,6 +1523,7 @@ Result Init()
   RETURN_IF_FAILURE(InitVkSurface(), "InitVkSurface");
   RETURN_IF_FAILURE(InitVkPhysicalDevice(), "InitVkPhysicalDevice");
   RETURN_IF_FAILURE(InitVkDevice(), "InitVkDevice");
+  RETURN_IF_FAILURE(InitVmaAllocator(), "InitVmaAllocator");
   RETURN_IF_FAILURE(InitVkSwapchain(), "InitVkSwapchain");
   RETURN_IF_FAILURE(InitVkShaders(), "InitVkShaders");
   RETURN_IF_FAILURE(InitVkDescriptorPool(), "InitVkDescriptorPool");
@@ -1575,6 +1564,7 @@ void Shutdown()
   DestroyVkDescriptorPool();
   DestroyVkShaders();
   DestroyVkSwapchain();
+  DestroyVmaAllocator();
   DestroyVkDevice();
   DestroyVkPhysicalDevice();
   DestroyVkSurface();
@@ -1608,9 +1598,9 @@ Result UpdateUniformBuffer()
   // Write to staging buffer
   {
     void* data;
-    vkMapMemory(g_Device, g_StagingBufferMemory, 0, sizeof(g_UniformBuffer), 0, &data);
+    vmaMapMemory(g_Allocator, g_StagingBufferAllocation, &data);
     memcpy(data, &g_UniformBuffer, sizeof(g_UniformBuffer));
-    vkUnmapMemory(g_Device, g_StagingBufferMemory);
+    vmaUnmapMemory(g_Allocator, g_StagingBufferAllocation);
   }
 
   // Write from staging buffer to device-local buffer

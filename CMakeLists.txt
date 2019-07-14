@@ -16,6 +16,8 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 add_executable(VulkanSDLApp
 	"src/stb_image.h"
 	"src/stb_image.c"
+	"src/vk_mem_alloc.h"
+	"src/vk_mem_alloc.cpp"
 	"src/Main.cpp")
 target_include_directories(VulkanSDLApp PUBLIC
 	"src"
